@@ -359,6 +359,12 @@ def test_repeated_check_now_does_not_restart_running_check(tmp_path: Path, monke
             self.sent_texts.append(text)
 
         async def edit_message_text(self, chat_id, message_id, text, reply_markup=None):
+            # Real Telegram rejects editMessageText with a ReplyKeyboardMarkup
+            # (only inline keyboards are valid on edits) — enforce that here so
+            # a regression to the old "MAIN_MENU_KEYBOARD on edit" bug fails
+            # this test instead of silently no-op'ing like the real API did.
+            if reply_markup is not None and "keyboard" in reply_markup and "inline_keyboard" not in reply_markup:
+                raise monitor.TelegramRequestError("Telegram editMessageText failed: HTTP 400")
             self.sent_texts.append(text)
 
     data_file = tmp_path / "products.json"
@@ -433,3 +439,6 @@ def test_repeated_check_now_does_not_restart_running_check(tmp_path: Path, monke
 
     assert fetch_calls == 1, "a second /check_now press must not trigger another Zara fetch"
     assert any("уже выполняется" in text for text in telegram.sent_texts)
+    assert any("Проверка завершена" in text for text in telegram.sent_texts), (
+        "final check summary must reach the watcher, not get lost to a failed edit"
+    )

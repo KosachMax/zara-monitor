@@ -155,7 +155,10 @@ async def edit_or_send_status(
         message = await telegram.send_message(chat_id, text, MAIN_MENU_KEYBOARD)
         return int(message["message_id"]) if message and "message_id" in message else None
     try:
-        await telegram.edit_message_text(chat_id, message_id, text, MAIN_MENU_KEYBOARD)
+        # Telegram's editMessageText only accepts an inline keyboard in
+        # reply_markup — a custom reply keyboard like MAIN_MENU_KEYBOARD is
+        # rejected with HTTP 400, which silently broke every progress update.
+        await telegram.edit_message_text(chat_id, message_id, text)
         return message_id
     except TelegramError as e:
         logger.warning("Failed to edit check status message %s for chat %s: %s", message_id, chat_id, e)
