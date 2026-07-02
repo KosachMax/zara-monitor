@@ -11,6 +11,7 @@ from .constants import (
     BTN_CHECK_NOW,
     BTN_LIST,
     BTN_REMOVE,
+    CHECK_NOW_WATCH_POLL_SEC,
     DEFAULT_COLOR_ID,
     IN_STOCK_STATUSES,
     MAIN_MENU_KEYBOARD,
@@ -207,7 +208,7 @@ async def watch_running_check_and_report(
         if text != last_text:
             message_id = await edit_or_send_status(telegram, chat_id, text, message_id)
             last_text = text
-        await asyncio.sleep(3)
+        await asyncio.sleep(CHECK_NOW_WATCH_POLL_SEC)
 
     summary = monitor.last_summary
     final_text = summary.format_for_user() if summary is not None else "Проверка завершена, но сводка недоступна."
@@ -483,11 +484,9 @@ async def handle_message(
 
     if text in ("/check_now", BTN_CHECK_NOW):
         if monitor.is_check_running():
-            await telegram.send_message(
-                chat_id,
-                monitor.current_progress().format_for_user("Проверка уже выполняется, дождись результата"),
-                MAIN_MENU_KEYBOARD,
-            )
+            # watch_running_check_and_report sends the first status update itself
+            # on its own first loop iteration — sending one here too would just
+            # duplicate that message.
             asyncio.create_task(watch_running_check_and_report(telegram, monitor, chat_id))
             return
 

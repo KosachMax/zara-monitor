@@ -83,6 +83,7 @@ https://www.zara.com/ru/ru/blazer-p04544820.html?v1=514777031
 | `REQUEST_DELAY_SEC` | `1` | Пауза между запросами к Zara внутри цикла. |
 | `DATA_FILE` | `/app/data/products.json` | Путь к persistent state. |
 | `PAGE_SIZE` | `10` | Размер страницы для `/list` и `/remove`. |
+| `CHECK_NOW_WATCH_POLL_SEC` | `3` | Как часто обновлять статус `/check_now`, если проверка уже шла до нажатия. |
 | `HEALTH_ERROR_THRESHOLD` | `3` | Сколько failed check cycles подряд нужно для health alert. |
 | `MAX_TRACKED_ITEMS` | `200` | Максимальное количество подписок в storage. |
 | `TELEGRAM_CONFLICT_EXIT_THRESHOLD` | `5` | Через сколько `409 Conflict` подряд worker падает fail-fast. |

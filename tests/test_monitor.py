@@ -383,6 +383,7 @@ def test_repeated_check_now_does_not_restart_running_check(tmp_path: Path, monke
     )
     monkeypatch.setattr(storage_module, "DATA_FILE", data_file)
     monkeypatch.setattr(monitor_service_module, "REQUEST_DELAY_SEC", 0)
+    monkeypatch.setattr(bot_controller_module, "CHECK_NOW_WATCH_POLL_SEC", 0)
 
     store = monitor.ProductStore(chat_ids=["111"], max_items=10)
     telegram = FakeTelegram()
@@ -401,6 +402,19 @@ def test_repeated_check_now_does_not_restart_running_check(tmp_path: Path, monke
     service = monitor.MonitorService(cast(Any, zara), cast(Any, telegram), store, config, health)
     pending: dict[str, dict[str, Any]] = {}
 
+    # /check_now's "already running" branch fires a background task
+    # (watch_running_check_and_report) rather than awaiting it inline, so
+    # capture it to await explicitly instead of racing the event loop.
+    background_tasks: list[asyncio.Task] = []
+    real_create_task = asyncio.create_task
+
+    def tracking_create_task(coro):
+        task = real_create_task(coro)
+        background_tasks.append(task)
+        return task
+
+    monkeypatch.setattr(bot_controller_module.asyncio, "create_task", tracking_create_task)
+
     async def scenario():
         first_check = asyncio.create_task(service.check_once())
         await asyncio.wait_for(fetch_started.wait(), timeout=1)
@@ -412,6 +426,8 @@ def test_repeated_check_now_does_not_restart_running_check(tmp_path: Path, monke
 
         release_fetch.set()
         await asyncio.wait_for(first_check, timeout=1)
+        for task in background_tasks:
+            await asyncio.wait_for(task, timeout=1)
 
     asyncio.run(scenario())
 

@@ -24,6 +24,7 @@ STATE_SCHEMA_VERSION = 2
 DATA_FILE = Path(os.environ.get("DATA_FILE", "/app/data/products.json"))
 REQUEST_DELAY_SEC = float(os.environ.get("REQUEST_DELAY_SEC", "1"))
 PAGE_SIZE = int(os.environ.get("PAGE_SIZE", "10"))
+CHECK_NOW_WATCH_POLL_SEC = float(os.environ.get("CHECK_NOW_WATCH_POLL_SEC", "3"))
 
 BTN_ADD = "➕ Добавить"
 BTN_REMOVE = "➖ Удалить"
