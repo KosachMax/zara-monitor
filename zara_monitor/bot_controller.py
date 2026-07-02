@@ -75,6 +75,28 @@ def format_waitlist(items: list[dict[str, Any]], page: int) -> tuple[str, dict[s
     return "\n".join(lines), keyboard
 
 
+def format_check_result(items: list[dict[str, Any]]) -> str:
+    in_stock = [item for item in items if item.get("last_available")]
+    out_count = len(items) - len(in_stock)
+
+    lines = ["<b>📊 Результаты проверки</b>"]
+
+    if in_stock:
+        lines.append("\n✅ <b>В наличии:</b>")
+        for i, item in enumerate(in_stock, 1):
+            name = html_escape(item.get("product_name") or item["product_id"])
+            size = html_escape(item["target_size_label"])
+            color = html_escape(item.get("color_name") or "")
+            url = product_page_url(item["product_id"])
+            color_line = f"\n🎨 {color}" if color else ""
+            lines.append(f'\n<b>{i}. {name}</b>{color_line}\n↳ <a href="{url}">{size}</a>')
+
+    if out_count > 0:
+        lines.append(f"\n❌ Нет в наличии: <b>{out_count}</b> позиций")
+
+    return "\n".join(lines)
+
+
 def sizes_inline_keyboard(sizes: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "inline_keyboard": [
@@ -233,6 +255,10 @@ async def run_check_now_and_report(
         [[{"text": "🔄 Проверить снова", "callback_data": CB_CHECK_NOW}]],
     )
 
+    items = await monitor.store.snapshot(str(chat_id))
+    if items:
+        await telegram.send_message(chat_id, format_check_result(items), MAIN_MENU_KEYBOARD)
+
 
 async def watch_running_check_and_report(
     telegram: TelegramClient,
@@ -254,6 +280,10 @@ async def watch_running_check_and_report(
         message_id,
         [[{"text": "🔄 Проверить снова", "callback_data": CB_CHECK_NOW}]],
     )
+
+    items = await monitor.store.snapshot(str(chat_id))
+    if items:
+        await telegram.send_message(chat_id, format_check_result(items), MAIN_MENU_KEYBOARD)
 
 
 async def watch_and_release(
@@ -543,17 +573,18 @@ async def handle_message(
         if monitor.is_check_running():
             if chat_key not in monitor.watching_chat_ids:
                 monitor.watching_chat_ids.add(chat_key)
+                chat_items = await store.snapshot(str(chat_id))
                 progress = monitor.current_progress()
                 msg = await telegram.send_message(
                     chat_id,
-                    f"📦 В каталоге: <b>{progress.total}</b> позиций",
+                    f"📦 В каталоге: <b>{len(chat_items)}</b> позиций",
                     {"inline_keyboard": [[{"text": progress.progress_bar_button(), "callback_data": CB_NOOP}]]},
                 )
                 msg_id = int(msg["message_id"]) if msg and "message_id" in msg else None
                 asyncio.create_task(watch_and_release(telegram, monitor, chat_id, chat_key, msg_id))
             return
 
-        items = await store.snapshot()
+        items = await store.snapshot(str(chat_id))
         total = len(items)
         init_btn = CheckProgress(total=total, running=True).progress_bar_button()
         msg = await telegram.send_message(
@@ -730,7 +761,7 @@ async def handle_callback(
                 monitor.watching_chat_ids.add(chat_key)
                 asyncio.create_task(watch_and_release(telegram, monitor, chat_id, chat_key, message_id))
             return
-        items = await store.snapshot()
+        items = await store.snapshot(str(chat_id))
         total = len(items)
         init_btn = CheckProgress(total=total, running=True).progress_bar_button()
         await update_check_button(
