@@ -152,7 +152,14 @@ async def edit_or_send_status(
     message_id: int | None,
 ) -> int | None:
     if message_id is None:
-        message = await telegram.send_message(chat_id, text, MAIN_MENU_KEYBOARD)
+        try:
+            message = await telegram.send_message(chat_id, text, MAIN_MENU_KEYBOARD)
+        except TelegramError as e:
+            # An unhandled error here would kill the whole background
+            # watcher/reporter task silently — the check keeps running, but
+            # the user never sees any progress or final result at all.
+            logger.warning("Failed to send check status message for chat %s: %s", chat_id, e)
+            return None
         return int(message["message_id"]) if message and "message_id" in message else None
     try:
         # Telegram's editMessageText only accepts an inline keyboard in
