@@ -75,15 +75,15 @@ def format_waitlist(items: list[dict[str, Any]], page: int) -> tuple[str, dict[s
     return "\n".join(lines), keyboard
 
 
-def format_check_result(items: list[dict[str, Any]], pre_available_ids: set[str]) -> str:
-    newly_available = [item for item in items if item.get("last_available") and item["id"] not in pre_available_ids]
+def format_check_result(items: list[dict[str, Any]]) -> str:
+    in_stock = [item for item in items if item.get("last_available")]
     out_count = sum(1 for item in items if not item.get("last_available"))
 
     lines = ["<b>📊 Результаты проверки</b>"]
 
-    if newly_available:
-        lines.append("\n✅ <b>Появилось:</b>")
-        for i, item in enumerate(newly_available, 1):
+    if in_stock:
+        lines.append("\n✅ <b>В наличии:</b>")
+        for i, item in enumerate(in_stock, 1):
             name = html_escape(item.get("product_name") or item["product_id"])
             size = html_escape(item["target_size_label"])
             color = html_escape(item.get("color_name") or "")
@@ -95,6 +95,42 @@ def format_check_result(items: list[dict[str, Any]], pre_available_ids: set[str]
         lines.append(f"\n❌ Нет в наличии: <b>{out_count}</b> позиций")
 
     return "\n".join(lines)
+
+
+async def send_check_result(
+    telegram: TelegramClient,
+    chat_id: str | int,
+    items: list[dict[str, Any]],
+) -> None:
+    in_stock = [item for item in items if item.get("last_available")]
+
+    for item in in_stock:
+        image_url = item.get("color_image") or item.get("product_image")
+        if not image_url:
+            continue
+        name = html_escape(item.get("product_name") or item["product_id"])
+        color = html_escape(item.get("color_name") or "")
+        size = html_escape(item["target_size_label"])
+        url = product_page_url(item["product_id"])
+        color_line = f"\n🎨 {color}" if color else ""
+        try:
+            await telegram.send_product_message(
+                chat_id,
+                f"<b>{name}</b>{color_line}\n📐 {size}",
+                image_url=image_url,
+                reply_markup={
+                    "inline_keyboard": [
+                        [
+                            {"text": "🔗 Открыть товар", "url": url},
+                            {"text": "🔕 Отписаться", "callback_data": f"remove_id:{item['id']}"},
+                        ]
+                    ]
+                },
+            )
+        except TelegramError as e:
+            logger.warning("Failed to send photo for %s in check result: %s", item["product_id"], e)
+
+    await telegram.send_message(chat_id, format_check_result(items), MAIN_MENU_KEYBOARD)
 
 
 def sizes_inline_keyboard(sizes: list[dict[str, Any]]) -> dict[str, Any]:
@@ -228,9 +264,6 @@ async def run_check_now_and_report(
     chat_id: str | int,
     message_id: int | None = None,
 ) -> None:
-    pre_snapshot = await monitor.store.snapshot(str(chat_id))
-    pre_available_ids = {item["id"] for item in pre_snapshot if item.get("last_available")}
-
     last_btn = ""
     last_update_at = 0.0
 
@@ -260,7 +293,7 @@ async def run_check_now_and_report(
 
     items = await monitor.store.snapshot(str(chat_id))
     if items:
-        await telegram.send_message(chat_id, format_check_result(items, pre_available_ids), MAIN_MENU_KEYBOARD)
+        await send_check_result(telegram, chat_id, items)
 
 
 async def watch_running_check_and_report(
@@ -269,9 +302,6 @@ async def watch_running_check_and_report(
     chat_id: str | int,
     message_id: int | None = None,
 ) -> None:
-    pre_snapshot = await monitor.store.snapshot(str(chat_id))
-    pre_available_ids = {item["id"] for item in pre_snapshot if item.get("last_available")}
-
     last_btn = ""
     while monitor.is_check_running():
         btn_text = monitor.current_progress().progress_bar_button()
@@ -289,7 +319,7 @@ async def watch_running_check_and_report(
 
     items = await monitor.store.snapshot(str(chat_id))
     if items:
-        await telegram.send_message(chat_id, format_check_result(items, pre_available_ids), MAIN_MENU_KEYBOARD)
+        await send_check_result(telegram, chat_id, items)
 
 
 async def watch_and_release(
