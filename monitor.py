@@ -287,7 +287,7 @@ def size_label(size: dict) -> str:
 
 def product_page_url(product_id: str) -> str:
     # Zara редиректит на канонический SEO-URL сама, достаточно правильного v1
-    return f"https://www.zara.com/us/en/-p.html?v1={product_id}"
+    return f"https://www.zara.com/bg/en/-p.html?v1={product_id}"
 
 
 def sizes_inline_keyboard(sizes: list[dict]) -> dict:
