@@ -633,12 +633,21 @@ async def check_loop(client: httpx.AsyncClient, store: ProductStore, config: "Co
 
             if is_available and not was_available:
                 label = item.get("product_name") or f"артикул {item['product_id']}"
+                product_url = f"https://www.zara.com/us/en/-p.html?v1={item['product_id']}"
                 await send_message(
                     client, config.tg_token, config.tg_chat_id,
                     f"🛍 <b>Zara: размер появился!</b>\n\n"
                     f"📦 {label}\n"
-                    f"📐 Размер: <b>{item['target_size_label']}</b>\n"
-                    f"🔗 https://www.zara.com/product/id/{item['product_id']}",
+                    f"📐 Размер: <b>{item['target_size_label']}</b>",
+                    reply_markup={
+                        "inline_keyboard": [[
+                            {"text": "🔗 Открыть товар", "url": product_url},
+                            {
+                                "text": "🔕 Отписаться",
+                                "callback_data": f"remove:{item['product_id']}:{item['target_size_id']}",
+                            },
+                        ]]
+                    },
                 )
 
             await store.set_availability(item["product_id"], item["target_size_id"], is_available)
