@@ -198,15 +198,21 @@ def test_legacy_migrated_subscriptions_notify_all_chats(tmp_path: Path, monkeypa
     assert telegram.sent_chat_ids == ["111", "222"]
 
 
-def test_health_monitor_sends_one_shot_degraded_alert():
+def test_health_monitor_marks_degraded_only_after_alert_delivery():
     health = monitor.HealthMonitor(threshold=2)
 
     assert health.record_failure("first") is False
     assert health.state == "OK"
     assert health.record_failure("second") is True
+    assert health.state == "OK"
+
+    # If Telegram delivery fails, next failed cycle should request alert again.
+    assert health.record_failure("third") is True
+    assert health.state == "OK"
+
+    health.mark_degraded_alert_sent()
     assert health.state == "DEGRADED"
-    assert health.record_failure("third") is False
-    assert health.state == "DEGRADED"
+    assert health.record_failure("fourth") is False
     assert health.record_success() is True
     assert health.state == "OK"
 

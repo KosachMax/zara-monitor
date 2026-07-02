@@ -29,10 +29,10 @@ class HealthMonitor:
         self.consecutive_failed_cycles += 1
         self.last_error = error
         self.last_check_at = now_iso()
-        if self.state != "DEGRADED" and self.consecutive_failed_cycles >= self.threshold:
-            self.state = "DEGRADED"
-            return True
-        return False
+        return self.state != "DEGRADED" and self.consecutive_failed_cycles >= self.threshold
+
+    def mark_degraded_alert_sent(self) -> None:
+        self.state = "DEGRADED"
 
     def uptime_seconds(self) -> int:
         return int((datetime.now(UTC) - self.started_at).total_seconds())

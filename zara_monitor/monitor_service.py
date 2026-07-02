@@ -114,6 +114,12 @@ class MonitorService:
                     if is_available and not item.get("last_available"):
                         sent = await self.send_stock_notification(item, color)
                         notifications += int(sent)
+                        if not sent:
+                            await self.store.set_error(
+                                item["id"],
+                                "Stock is available, but notification was skipped because chat_id is not allowed",
+                            )
+                            continue
 
                     await self.store.set_check_result(item["id"], is_available=is_available)
                 except ZaraError as e:
@@ -130,8 +136,8 @@ class MonitorService:
 
             if errors:
                 alert_due = self.health.record_failure(errors[0])
-                if alert_due:
-                    await self.broadcast_health_alert(errors[0])
+                if alert_due and await self.broadcast_health_alert(errors[0]):
+                    self.health.mark_degraded_alert_sent()
             else:
                 recovery_due = self.health.record_success()
                 if recovery_due:
@@ -174,7 +180,7 @@ class MonitorService:
         )
         return True
 
-    async def broadcast_health_alert(self, error: str) -> None:
+    async def broadcast_health_alert(self, error: str) -> bool:
         text = (
             "⚠️ <b>Zara Monitor: проблема с проверкой товаров</b>\n\n"
             f"Не могу стабильно получить данные уже {self.health.consecutive_failed_cycles} "
@@ -182,14 +188,17 @@ class MonitorService:
             f"Последняя ошибка: <code>{html_escape(error)}</code>\n\n"
             "Повторять это предупреждение не буду, пока состояние не изменится."
         )
-        await self.broadcast_to_admins(text)
+        return await self.broadcast_to_admins(text)
 
     async def broadcast_recovery(self) -> None:
         await self.broadcast_to_admins("✅ <b>Zara Monitor восстановился</b>\nПроверки снова проходят успешно.")
 
-    async def broadcast_to_admins(self, text: str) -> None:
+    async def broadcast_to_admins(self, text: str) -> bool:
+        delivered = False
         for chat_id in self.config.tg_chat_ids:
             try:
                 await self.telegram.send_message(chat_id, text, MAIN_MENU_KEYBOARD)
+                delivered = True
             except TelegramError as e:
                 logger.error("Failed to send health message to %s: %s", chat_id, e)
+        return delivered

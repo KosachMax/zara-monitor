@@ -127,17 +127,40 @@ def save_state(items: list[dict[str, Any]]) -> None:
 
 
 class ProductStore:
-    """Persistent subscription store backed by a schema-versioned JSON file."""
+    """Persistent subscription store backed by a schema-versioned JSON file.
 
-    def __init__(self, chat_ids: list[str], max_items: int) -> None:
-        self.items, needs_save = load_state(chat_ids)
+    When `tolerate_load_error` is true, startup storage errors do not crash the
+    worker. The store becomes read-only with an empty in-memory list so Telegram
+    can still report the problem instead of silently bricking the service.
+    """
+
+    def __init__(self, chat_ids: list[str], max_items: int, *, tolerate_load_error: bool = False) -> None:
         self.max_items = max_items
         self.lock = asyncio.Lock()
-        if needs_save:
-            logger.info("Migrating state file to schema v%s", STATE_SCHEMA_VERSION)
-            save_state(self.items)
+        self.load_error: StorageError | None = None
+
+        try:
+            self.items, needs_save = load_state(chat_ids)
+            if needs_save:
+                logger.info("Migrating state file to schema v%s", STATE_SCHEMA_VERSION)
+                save_state(self.items)
+        except StorageError as e:
+            if not tolerate_load_error:
+                raise
+            self.items = []
+            self.load_error = e
+            logger.error("Storage is unavailable, running in read-only degraded mode: %s", e)
+
+    @property
+    def is_available(self) -> bool:
+        return self.load_error is None
+
+    def ensure_available(self) -> None:
+        if self.load_error is not None:
+            raise StorageError(f"Storage is unavailable: {self.load_error}")
 
     async def add(self, item: dict[str, Any]) -> tuple[bool, dict[str, Any] | None]:
+        self.ensure_available()
         async with self.lock:
             existing = self.find_duplicate_locked(item)
             if existing is not None:
@@ -156,6 +179,7 @@ class ProductStore:
         return None
 
     async def remove_all(self, chat_id: str, product_id: str) -> list[dict[str, Any]]:
+        self.ensure_available()
         async with self.lock:
             removed = [
                 item for item in self.items if item["chat_id"] == str(chat_id) and item["product_id"] == str(product_id)
@@ -167,6 +191,7 @@ class ProductStore:
             return removed
 
     async def remove_by_id(self, chat_id: str, subscription_id: str) -> dict[str, Any] | None:
+        self.ensure_available()
         async with self.lock:
             for index, item in enumerate(self.items):
                 if item["id"] == subscription_id and item["chat_id"] == str(chat_id):
@@ -176,6 +201,7 @@ class ProductStore:
             return None
 
     async def remove_legacy(self, chat_id: str, product_id: str, target_size_id: str) -> dict[str, Any] | None:
+        self.ensure_available()
         async with self.lock:
             for index, item in enumerate(self.items):
                 if (
@@ -201,6 +227,7 @@ class ProductStore:
         is_available: bool,
         error: str | None = None,
     ) -> None:
+        self.ensure_available()
         async with self.lock:
             for item in self.items:
                 if item["id"] == subscription_id:
@@ -212,6 +239,7 @@ class ProductStore:
                     return
 
     async def set_error(self, subscription_id: str, error: str) -> None:
+        self.ensure_available()
         async with self.lock:
             for item in self.items:
                 if item["id"] == subscription_id:

@@ -144,6 +144,22 @@ async def send_status(
     await telegram.send_message(chat_id, health.status_text(len(items), config.interval), MAIN_MENU_KEYBOARD)
 
 
+async def run_check_now_and_report(telegram: TelegramClient, monitor: MonitorService, chat_id: str | int) -> None:
+    try:
+        summary = await monitor.check_once()
+        await telegram.send_message(chat_id, summary.format_for_user(), MAIN_MENU_KEYBOARD)
+    except Exception as e:
+        logger.error("Background /check_now failed for chat %s: %s", chat_id, sanitize_log_value(str(e)))
+        try:
+            await telegram.send_message(
+                chat_id,
+                f"Проверка завершилась ошибкой: <code>{html_escape(e)}</code>",
+                MAIN_MENU_KEYBOARD,
+            )
+        except TelegramError as send_error:
+            logger.error("Failed to report /check_now error to %s: %s", chat_id, send_error)
+
+
 async def send_add_prompt(
     telegram: TelegramClient,
     chat_id: str | int,
@@ -273,6 +289,7 @@ async def add_selected_size(
     color_line = f"\n🎨 Цвет: <b>{html_escape(item['color_name'])}</b>" if item.get("color_name") else ""
 
     if not added:
+        assert existing is not None
         await telegram.send_product_message(
             chat_id,
             "Невозможно добавить товар: он уже есть в мониторинге.\n\n"
@@ -410,9 +427,8 @@ async def handle_message(
         return
 
     if text in ("/check_now", BTN_CHECK_NOW):
-        await telegram.send_message(chat_id, "Запускаю внеочередную проверку...", MAIN_MENU_KEYBOARD)
-        summary = await monitor.check_once()
-        await telegram.send_message(chat_id, summary.format_for_user(), MAIN_MENU_KEYBOARD)
+        await telegram.send_message(chat_id, "Запускаю внеочередную проверку в фоне...", MAIN_MENU_KEYBOARD)
+        asyncio.create_task(run_check_now_and_report(telegram, monitor, chat_id))
         return
 
     if text == "/export":
