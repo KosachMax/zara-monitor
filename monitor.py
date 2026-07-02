@@ -98,12 +98,26 @@ def parse_sizes(data: dict) -> list[dict]:
     return sizes
 
 
+def extract_image_url(data: dict) -> str | None:
+    """Достаём URL первой фотографии товара (первый цвет, первое изображение)."""
+    detail = data.get("detail", data)
+    colors = detail.get("colors", [])
+    if not colors:
+        return None
+
+    xmedia = colors[0].get("xmedia", [])
+    if not xmedia:
+        return None
+
+    return xmedia[0].get("extraInfo", {}).get("deliveryUrl")
+
+
 async def fetch_product(
     client: httpx.AsyncClient,
     product_id: str,
     store_id: str,
     locale: str,
-) -> tuple[str, list[dict]]:
+) -> tuple[str, str | None, list[dict]]:
     url = PRODUCT_API_URL.format(store_id=store_id, product_id=product_id)
 
     response = await client.get(
@@ -111,7 +125,7 @@ async def fetch_product(
     )
     response.raise_for_status()
     data = response.json()
-    return data.get("name", ""), parse_sizes(data)
+    return data.get("name", ""), extract_image_url(data), parse_sizes(data)
 
 
 async def fetch_sizes(
@@ -120,7 +134,7 @@ async def fetch_sizes(
     store_id: str,
     locale: str,
 ) -> list[dict]:
-    _, sizes = await fetch_product(client, product_id, store_id, locale)
+    _, _, sizes = await fetch_product(client, product_id, store_id, locale)
     return sizes
 
 
@@ -222,6 +236,41 @@ async def send_message(
     resp.raise_for_status()
 
 
+async def send_photo(
+    client: httpx.AsyncClient,
+    token: str,
+    chat_id,
+    photo_url: str,
+    caption: str,
+    reply_markup: dict | None = None,
+) -> None:
+    url = f"https://api.telegram.org/bot{token}/sendPhoto"
+    payload = {"chat_id": chat_id, "photo": photo_url, "caption": caption, "parse_mode": "HTML"}
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup
+    resp = await client.post(url, json=payload, timeout=15.0)
+    resp.raise_for_status()
+
+
+async def send_product_message(
+    client: httpx.AsyncClient,
+    token: str,
+    chat_id,
+    text: str,
+    image_url: str | None = None,
+    reply_markup: dict | None = None,
+) -> None:
+    """Сообщение о конкретном товаре — с фото, если оно есть, иначе обычный текст."""
+    if image_url:
+        try:
+            await send_photo(client, token, chat_id, image_url, text, reply_markup)
+            return
+        except Exception as e:
+            logger.warning(f"sendPhoto failed, falling back to text: {e}")
+
+    await send_message(client, token, chat_id, text, reply_markup)
+
+
 async def answer_callback_query(client: httpx.AsyncClient, token: str, callback_query_id: str) -> None:
     url = f"https://api.telegram.org/bot{token}/answerCallbackQuery"
     resp = await client.post(url, json={"callback_query_id": callback_query_id}, timeout=10.0)
@@ -268,7 +317,7 @@ async def start_add_flow(
         return
 
     try:
-        name, sizes = await fetch_product(client, product_id, config.store_id, config.locale)
+        name, image_url, sizes = await fetch_product(client, product_id, config.store_id, config.locale)
     except Exception as e:
         pending.pop(chat_id, None)
         await send_message(
@@ -285,11 +334,13 @@ async def start_add_flow(
         "stage": "choosing_size",
         "product_id": product_id,
         "product_name": name,
+        "product_image": image_url,
         "sizes": sizes,
     }
-    await send_message(
+    await send_product_message(
         client, config.tg_token, chat_id,
         f"{name or f'артикул {product_id}'}. Выбери размер:",
+        image_url=image_url,
         reply_markup=sizes_inline_keyboard(sizes),
     )
 
@@ -363,7 +414,9 @@ async def handle_message(
             return
 
         try:
-            name, sizes = await fetch_product(client, shared_product_id, config.store_id, config.locale)
+            name, image_url, sizes = await fetch_product(
+                client, shared_product_id, config.store_id, config.locale
+            )
         except Exception as e:
             await send_message(
                 client, config.tg_token, chat_id,
@@ -376,12 +429,14 @@ async def handle_message(
             "stage": "confirm_add",
             "product_id": shared_product_id,
             "product_name": name,
+            "product_image": image_url,
             "sizes": sizes,
         }
-        await send_message(
+        await send_product_message(
             client, config.tg_token, chat_id,
             f"Похоже на товар Zara: <b>{name or f'артикул {shared_product_id}'}</b>.\n"
             f"Добавить его для мониторинга?",
+            image_url=image_url,
             reply_markup={
                 "inline_keyboard": [[
                     {"text": "✅ Да", "callback_data": f"confirm_add:{shared_product_id}"},
@@ -464,7 +519,8 @@ async def handle_message(
             return
 
         await add_selected_size(
-            client, store, config, chat_id, info["product_id"], info.get("product_name", ""), chosen
+            client, store, config, chat_id, info["product_id"],
+            info.get("product_name", ""), info.get("product_image"), chosen,
         )
         return
 
@@ -482,12 +538,14 @@ async def add_selected_size(
     chat_id,
     product_id: str,
     product_name: str,
+    product_image: str | None,
     chosen: dict,
 ) -> None:
     is_available = chosen["availability"] in IN_STOCK_STATUSES
     item = {
         "product_id": product_id,
         "product_name": product_name,
+        "product_image": product_image,
         "target_size_id": chosen["id"],
         "target_size_label": size_label(chosen),
         "last_available": is_available,
@@ -495,9 +553,10 @@ async def add_selected_size(
     await store.add(item)
     label = product_name or f"артикул {product_id}"
     status = "уже в наличии ✅" if is_available else "пока нет в наличии, сообщу когда появится ❌"
-    await send_message(
+    await send_product_message(
         client, config.tg_token, chat_id,
         f"Добавлено: {label} / {item['target_size_label']} — {status}",
+        image_url=product_image,
         reply_markup=MAIN_MENU_KEYBOARD,
     )
 
@@ -525,9 +584,11 @@ async def handle_callback(
 
         pending[chat_id] = {**info, "stage": "choosing_size"}
         name = info.get("product_name", "")
-        await send_message(
+        image_url = info.get("product_image")
+        await send_product_message(
             client, config.tg_token, chat_id,
             f"{name or f'артикул {value}'}. Выбери размер:",
+            image_url=image_url,
             reply_markup=sizes_inline_keyboard(info["sizes"]),
         )
         return
@@ -543,7 +604,8 @@ async def handle_callback(
             return
         pending.pop(chat_id, None)
         await add_selected_size(
-            client, store, config, chat_id, info["product_id"], info.get("product_name", ""), sizes[idx]
+            client, store, config, chat_id, info["product_id"],
+            info.get("product_name", ""), info.get("product_image"), sizes[idx],
         )
         return
 
@@ -635,11 +697,12 @@ async def check_loop(client: httpx.AsyncClient, store: ProductStore, config: "Co
                 label = item.get("product_name") or f"артикул {item['product_id']}"
                 product_url = f"https://www.zara.com/us/en/-p.html?v1={item['product_id']}"
                 for chat_id in config.tg_chat_ids:
-                    await send_message(
+                    await send_product_message(
                         client, config.tg_token, chat_id,
                         f"🛍 <b>Zara: размер появился!</b>\n\n"
                         f"📦 {label}\n"
                         f"📐 Размер: <b>{item['target_size_label']}</b>",
+                        image_url=item.get("product_image"),
                         reply_markup={
                             "inline_keyboard": [[
                                 {"text": "🔗 Открыть товар", "url": product_url},
