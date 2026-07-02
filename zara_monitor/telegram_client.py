@@ -68,7 +68,7 @@ class TelegramClient:
         chat_id: str | int,
         text: str,
         reply_markup: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> dict[str, Any] | None:
         payload: dict[str, Any] = {
             "chat_id": chat_id,
             "text": text,
@@ -77,7 +77,27 @@ class TelegramClient:
         }
         if reply_markup is not None:
             payload["reply_markup"] = reply_markup
-        await self.request("sendMessage", json_payload=payload, timeout=10.0)
+        data = await self.request("sendMessage", json_payload=payload, timeout=10.0)
+        result = data.get("result")
+        return result if isinstance(result, dict) else None
+
+    async def edit_message_text(
+        self,
+        chat_id: str | int,
+        message_id: int,
+        text: str,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": False,
+        }
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+        await self.request("editMessageText", json_payload=payload, timeout=10.0)
 
     async def send_photo(
         self,

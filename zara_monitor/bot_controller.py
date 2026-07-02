@@ -19,7 +19,7 @@ from .constants import (
 from .errors import MaxTrackedItemsError, TelegramConflictError, TelegramError, ZaraError
 from .health import HealthMonitor
 from .logging_config import sanitize_log_value
-from .monitor_service import MonitorService
+from .monitor_service import CheckProgress, MonitorService
 from .storage import ProductStore
 from .telegram_client import TelegramClient
 from .utils import extract_product_id_from_url, find_zara_url, html_escape, now_iso, product_page_url, size_label
@@ -144,20 +144,75 @@ async def send_status(
     await telegram.send_message(chat_id, health.status_text(len(items), config.interval), MAIN_MENU_KEYBOARD)
 
 
-async def run_check_now_and_report(telegram: TelegramClient, monitor: MonitorService, chat_id: str | int) -> None:
+async def edit_or_send_status(
+    telegram: TelegramClient,
+    chat_id: str | int,
+    text: str,
+    message_id: int | None,
+) -> int | None:
+    if message_id is None:
+        message = await telegram.send_message(chat_id, text, MAIN_MENU_KEYBOARD)
+        return int(message["message_id"]) if message and "message_id" in message else None
     try:
-        summary = await monitor.check_once()
-        await telegram.send_message(chat_id, summary.format_for_user(), MAIN_MENU_KEYBOARD)
+        await telegram.edit_message_text(chat_id, message_id, text, MAIN_MENU_KEYBOARD)
+        return message_id
+    except TelegramError as e:
+        logger.warning("Failed to edit check status message %s for chat %s: %s", message_id, chat_id, e)
+        return message_id
+
+
+async def run_check_now_and_report(
+    telegram: TelegramClient,
+    monitor: MonitorService,
+    chat_id: str | int,
+    message_id: int | None = None,
+) -> None:
+    last_text = ""
+
+    async def publish(progress: CheckProgress) -> None:
+        nonlocal last_text, message_id
+        text = progress.format_for_user()
+        if text == last_text:
+            return
+        message_id = await edit_or_send_status(telegram, chat_id, text, message_id)
+        last_text = text
+
+    try:
+        summary = await monitor.check_once(progress_callback=publish)
+        final_text = summary.format_for_user()
+        if final_text != last_text:
+            await edit_or_send_status(telegram, chat_id, final_text, message_id)
     except Exception as e:
         logger.error("Background /check_now failed for chat %s: %s", chat_id, sanitize_log_value(str(e)))
         try:
-            await telegram.send_message(
+            await edit_or_send_status(
+                telegram,
                 chat_id,
                 f"Проверка завершилась ошибкой: <code>{html_escape(e)}</code>",
-                MAIN_MENU_KEYBOARD,
+                message_id,
             )
         except TelegramError as send_error:
             logger.error("Failed to report /check_now error to %s: %s", chat_id, send_error)
+
+
+async def watch_running_check_and_report(
+    telegram: TelegramClient,
+    monitor: MonitorService,
+    chat_id: str | int,
+    message_id: int | None = None,
+) -> None:
+    last_text = ""
+    while monitor.is_check_running():
+        text = monitor.current_progress().format_for_user("Проверка уже выполняется, дождись результата")
+        if text != last_text:
+            message_id = await edit_or_send_status(telegram, chat_id, text, message_id)
+            last_text = text
+        await asyncio.sleep(3)
+
+    summary = monitor.last_summary
+    final_text = summary.format_for_user() if summary is not None else "Проверка завершена, но сводка недоступна."
+    if final_text != last_text:
+        await edit_or_send_status(telegram, chat_id, final_text, message_id)
 
 
 async def send_add_prompt(

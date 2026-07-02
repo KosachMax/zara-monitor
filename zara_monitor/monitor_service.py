@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -42,6 +43,68 @@ def find_target_size(
 
 
 @dataclass(slots=True)
+class CheckProgress:
+    running: bool = False
+    total: int = 0
+    checked: int = 0
+    errors: int = 0
+    notifications: int = 0
+    available: int = 0
+    current_product_id: str = ""
+    started_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    def progress_bar(self, width: int = 12) -> str:
+        if self.total <= 0:
+            return "░" * width
+        filled = min(width, max(0, round(width * self.checked / self.total)))
+        return "█" * filled + "░" * (width - filled)
+
+    def format_for_user(self, title: str | None = None) -> str:
+        status = title or ("Проверка выполняется" if self.running else "Проверка завершена")
+        elapsed_line = ""
+        if self.started_at is not None:
+            elapsed_sec = max(0, int((datetime.now() - self.started_at).total_seconds()))
+            elapsed_line = f"\n⏱ Уже идёт: <b>{elapsed_sec // 60}:{elapsed_sec % 60:02d}</b>"
+        current_line = (
+            f"\n📦 Сейчас: <code>{html_escape(self.current_product_id)}</code>" if self.current_product_id else ""
+        )
+        return (
+            f"🔄 <b>{html_escape(status)}</b>\n\n"
+            f"<code>{self.progress_bar()}</code> <b>{self.checked}/{self.total}</b>"
+            f"{elapsed_line}{current_line}\n"
+            f"✅ В наличии: <b>{self.available}</b>\n"
+            f"🔔 Уведомлений: <b>{self.notifications}</b>\n"
+            f"⚠️ Ошибок: <b>{self.errors}</b>"
+        )
+
+
+ProgressCallback = Callable[[CheckProgress], Awaitable[None]]
+
+
+@dataclass(slots=True)
+class CheckItemResult:
+    product_id: str
+    product_name: str
+    target_size_label: str
+    color_name: str = ""
+    is_available: bool = False
+    notification_sent: bool = False
+    error: str | None = None
+
+    def format_for_user(self) -> str:
+        status = "⚠️" if self.error else "✅" if self.is_available else "❌"
+        label = self.product_name or f"артикул {self.product_id}"
+        color_suffix = f" / {self.color_name}" if self.color_name else ""
+        notification_suffix = " / 🔔" if self.notification_sent else ""
+        error_suffix = f" — <code>{html_escape(self.error)}</code>" if self.error else ""
+        return (
+            f"{status} <b>{html_escape(label)}</b>{html_escape(color_suffix)}\n"
+            f"   📐 {html_escape(self.target_size_label)}{notification_suffix}{error_suffix}"
+        )
+
+
+@dataclass(slots=True)
 class CheckSummary:
     started: bool
     checked: int = 0
@@ -49,17 +112,26 @@ class CheckSummary:
     notifications: int = 0
     available: int = 0
     message: str = ""
+    results: list[CheckItemResult] | None = None
 
     def format_for_user(self) -> str:
         if not self.started:
             return self.message or "Проверка уже выполняется."
-        return (
-            "Проверка завершена.\n"
-            f"Проверено: <b>{self.checked}</b>\n"
-            f"В наличии: <b>{self.available}</b>\n"
-            f"Уведомлений отправлено: <b>{self.notifications}</b>\n"
-            f"Ошибок: <b>{self.errors}</b>"
-        )
+        if self.message:
+            return self.message
+
+        lines = [
+            "✅ <b>Проверка завершена</b>",
+            "",
+            f"Проверено: <b>{self.checked}</b>",
+            f"В наличии: <b>{self.available}</b>",
+            f"Уведомлений отправлено: <b>{self.notifications}</b>",
+            f"Ошибок: <b>{self.errors}</b>",
+        ]
+        if self.results:
+            lines.extend(["", "<b>Сводка по товарам:</b>"])
+            lines.extend(result.format_for_user() for result in self.results)
+        return "\n".join(lines)
 
 
 class MonitorService:
@@ -77,28 +149,77 @@ class MonitorService:
         self.config = config
         self.health = health
         self.check_lock = asyncio.Lock()
+        self.progress = CheckProgress()
+        self.last_summary: CheckSummary | None = None
 
-    async def check_once(self) -> CheckSummary:
+    def is_check_running(self) -> bool:
+        return self.check_lock.locked()
+
+    def current_progress(self) -> CheckProgress:
+        return CheckProgress(
+            running=self.progress.running,
+            total=self.progress.total,
+            checked=self.progress.checked,
+            errors=self.progress.errors,
+            notifications=self.progress.notifications,
+            available=self.progress.available,
+            current_product_id=self.progress.current_product_id,
+            started_at=self.progress.started_at,
+            updated_at=self.progress.updated_at,
+        )
+
+    async def publish_progress(self, progress_callback: ProgressCallback | None) -> None:
+        if progress_callback is not None:
+            await progress_callback(self.current_progress())
+
+    async def check_once(self, progress_callback: ProgressCallback | None = None) -> CheckSummary:
         if self.check_lock.locked():
-            return CheckSummary(started=False, message="Проверка уже выполняется, дождись результата.")
+            return CheckSummary(
+                started=False,
+                message=self.current_progress().format_for_user("Проверка уже выполняется, дождись результата"),
+            )
 
         async with self.check_lock:
             items = await self.store.snapshot()
+            started_at = datetime.now()
+            self.progress = CheckProgress(
+                running=True,
+                total=len(items),
+                started_at=started_at,
+                updated_at=started_at,
+            )
+            await self.publish_progress(progress_callback)
+
             if not items:
                 self.health.record_success()
-                return CheckSummary(started=True, message="Список мониторинга пуст.")
+                self.progress = CheckProgress(running=False, total=0, started_at=started_at, updated_at=datetime.now())
+                await self.publish_progress(progress_callback)
+                self.last_summary = CheckSummary(started=True, message="Список мониторинга пуст.")
+                return self.last_summary
 
             checked = 0
             errors: list[str] = []
             notifications = 0
             available = 0
+            results: list[CheckItemResult] = []
 
             for item in items:
+                item_result = CheckItemResult(
+                    product_id=str(item["product_id"]),
+                    product_name=str(item.get("product_name") or ""),
+                    target_size_label=str(item["target_size_label"]),
+                    color_name=str(item.get("color_name") or ""),
+                )
+                self.progress.current_product_id = item_result.product_id
+                self.progress.updated_at = datetime.now()
+                await self.publish_progress(progress_callback)
+
                 checked += 1
                 try:
                     product = await self.zara.fetch_product(item["product_id"])
                     color, target = find_target_size(product, item)
                     is_available = bool(target) and target["availability"] in IN_STOCK_STATUSES
+                    item_result.is_available = is_available
                     if is_available:
                         available += 1
 
@@ -116,23 +237,33 @@ class MonitorService:
 
                     if became_available:
                         sent = await self.send_stock_notification(item, color)
+                        item_result.notification_sent = sent
                         notifications += int(sent)
                         if not sent:
-                            await self.store.set_error(
-                                item["id"],
-                                "Stock is available, but notification was skipped because chat_id is not allowed",
+                            item_result.error = (
+                                "Stock is available, but notification was skipped because chat_id is not allowed"
                             )
+                            await self.store.set_error(item["id"], item_result.error)
                 except ZaraError as e:
                     error = str(sanitize_log_value(e))
+                    item_result.error = error
                     errors.append(f"{item['product_id']}: {error}")
                     logger.error("Check failed for %s: %s", item["product_id"], error)
                     await self.store.set_error(item["id"], error)
                 except TelegramError as e:
                     error = str(sanitize_log_value(e))
+                    item_result.error = error
                     errors.append(f"telegram: {error}")
                     logger.error("Notification failed for %s: %s", item["product_id"], error)
                     await self.store.set_error(item["id"], error)
                 finally:
+                    results.append(item_result)
+                    self.progress.checked = checked
+                    self.progress.errors = len(errors)
+                    self.progress.notifications = notifications
+                    self.progress.available = available
+                    self.progress.updated_at = datetime.now()
+                    await self.publish_progress(progress_callback)
                     await asyncio.sleep(REQUEST_DELAY_SEC)
 
             if errors:
@@ -144,13 +275,27 @@ class MonitorService:
                 if recovery_due:
                     await self.broadcast_recovery()
 
-            return CheckSummary(
+            self.progress = CheckProgress(
+                running=False,
+                total=len(items),
+                checked=checked,
+                errors=len(errors),
+                notifications=notifications,
+                available=available,
+                started_at=started_at,
+                updated_at=datetime.now(),
+            )
+            await self.publish_progress(progress_callback)
+
+            self.last_summary = CheckSummary(
                 started=True,
                 checked=checked,
                 errors=len(errors),
                 notifications=notifications,
                 available=available,
+                results=results,
             )
+            return self.last_summary
 
     async def send_stock_notification(self, item: dict[str, Any], color: dict[str, Any] | None) -> bool:
         chat_id = str(item["chat_id"])
