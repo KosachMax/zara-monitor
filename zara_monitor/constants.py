@@ -31,6 +31,9 @@ BTN_REMOVE = "➖ Удалить"
 BTN_LIST = "📋 Список"
 BTN_CHECK_NOW = "🔄 Проверить"
 
+CB_NOOP = "noop"
+CB_CHECK_NOW = "check_now"
+
 MAIN_MENU_KEYBOARD = {
     "keyboard": [
         [{"text": BTN_ADD}, {"text": BTN_LIST}],

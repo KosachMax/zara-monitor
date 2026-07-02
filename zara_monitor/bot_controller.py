@@ -12,6 +12,8 @@ from .constants import (
     BTN_CHECK_NOW,
     BTN_LIST,
     BTN_REMOVE,
+    CB_CHECK_NOW,
+    CB_NOOP,
     CHECK_NOW_WATCH_POLL_SEC,
     DEFAULT_COLOR_ID,
     IN_STOCK_STATUSES,
@@ -184,48 +186,52 @@ async def edit_or_send_status(
     return int(message["message_id"]) if message and "message_id" in message else None
 
 
+async def update_check_button(
+    telegram: TelegramClient,
+    chat_id: str | int,
+    message_id: int | None,
+    buttons: list[list[dict]],
+) -> None:
+    if message_id is None:
+        return
+    try:
+        await telegram.edit_message_reply_markup(chat_id, message_id, {"inline_keyboard": buttons})
+    except TelegramError as e:
+        logger.warning("Failed to update check button for chat %s msg %s: %s", chat_id, message_id, e)
+
+
 async def run_check_now_and_report(
     telegram: TelegramClient,
     monitor: MonitorService,
     chat_id: str | int,
     message_id: int | None = None,
 ) -> None:
-    last_text = ""
+    last_btn = ""
     last_update_at = 0.0
 
     async def publish(progress: CheckProgress) -> None:
-        nonlocal last_text, last_update_at, message_id
-        text = progress.format_for_user()
-        if text == last_text:
+        nonlocal last_btn, last_update_at
+        btn_text = progress.progress_bar_button()
+        if btn_text == last_btn:
             return
-        # Updating on every single subscription/product would fire an edit
-        # roughly once a second across a long check — pace it down to the
-        # same cadence as the "already running" watcher instead. The true
-        # final result is always sent separately below regardless of this
-        # throttle, so skipping an intermediate tick here never loses it.
         now = time.monotonic()
         if now - last_update_at < CHECK_NOW_WATCH_POLL_SEC:
             return
         last_update_at = now
-        message_id = await edit_or_send_status(telegram, chat_id, text, message_id)
-        last_text = text
+        await update_check_button(telegram, chat_id, message_id, [[{"text": btn_text, "callback_data": CB_NOOP}]])
+        last_btn = btn_text
 
     try:
-        summary = await monitor.check_once(progress_callback=publish)
-        final_text = summary.format_for_user()
-        if final_text != last_text:
-            await edit_or_send_status(telegram, chat_id, final_text, message_id)
+        await monitor.check_once(progress_callback=publish)
     except Exception as e:
         logger.error("Background /check_now failed for chat %s: %s", chat_id, sanitize_log_value(str(e)))
-        try:
-            await edit_or_send_status(
-                telegram,
-                chat_id,
-                f"Проверка завершилась ошибкой: <code>{html_escape(e)}</code>",
-                message_id,
-            )
-        except TelegramError as send_error:
-            logger.error("Failed to report /check_now error to %s: %s", chat_id, send_error)
+
+    await update_check_button(
+        telegram,
+        chat_id,
+        message_id,
+        [[{"text": "🔄 Проверить снова", "callback_data": CB_CHECK_NOW}]],
+    )
 
 
 async def watch_running_check_and_report(
@@ -234,18 +240,20 @@ async def watch_running_check_and_report(
     chat_id: str | int,
     message_id: int | None = None,
 ) -> None:
-    last_text = ""
+    last_btn = ""
     while monitor.is_check_running():
-        text = monitor.current_progress().format_for_user("Проверка уже выполняется, дождись результата")
-        if text != last_text:
-            message_id = await edit_or_send_status(telegram, chat_id, text, message_id)
-            last_text = text
+        btn_text = monitor.current_progress().progress_bar_button()
+        if btn_text != last_btn:
+            await update_check_button(telegram, chat_id, message_id, [[{"text": btn_text, "callback_data": CB_NOOP}]])
+            last_btn = btn_text
         await asyncio.sleep(CHECK_NOW_WATCH_POLL_SEC)
 
-    summary = monitor.last_summary
-    final_text = summary.format_for_user() if summary is not None else "Проверка завершена, но сводка недоступна."
-    if final_text != last_text:
-        await edit_or_send_status(telegram, chat_id, final_text, message_id)
+    await update_check_button(
+        telegram,
+        chat_id,
+        message_id,
+        [[{"text": "🔄 Проверить снова", "callback_data": CB_CHECK_NOW}]],
+    )
 
 
 async def watch_and_release(
@@ -253,13 +261,14 @@ async def watch_and_release(
     monitor: MonitorService,
     chat_id: str | int,
     chat_key: str,
+    message_id: int | None = None,
 ) -> None:
     """Runs watch_running_check_and_report and always frees the chat's slot
     in monitor.watching_chat_ids afterwards, even if the watcher errors out —
     otherwise a crashed watcher would permanently block future /check_now
     presses for that chat."""
     try:
-        await watch_running_check_and_report(telegram, monitor, chat_id)
+        await watch_running_check_and_report(telegram, monitor, chat_id, message_id)
     finally:
         monitor.watching_chat_ids.discard(chat_key)
 
@@ -534,13 +543,26 @@ async def handle_message(
         if monitor.is_check_running():
             if chat_key not in monitor.watching_chat_ids:
                 monitor.watching_chat_ids.add(chat_key)
-                asyncio.create_task(watch_and_release(telegram, monitor, chat_id, chat_key))
-            # Already watching this chat — the running watcher keeps editing
-            # the same message, so a repeated press has nothing new to do.
+                progress = monitor.current_progress()
+                msg = await telegram.send_message(
+                    chat_id,
+                    f"📦 В каталоге: <b>{progress.total}</b> позиций",
+                    {"inline_keyboard": [[{"text": progress.progress_bar_button(), "callback_data": CB_NOOP}]]},
+                )
+                msg_id = int(msg["message_id"]) if msg and "message_id" in msg else None
+                asyncio.create_task(watch_and_release(telegram, monitor, chat_id, chat_key, msg_id))
             return
 
-        await telegram.send_message(chat_id, "Запускаю внеочередную проверку в фоне...", MAIN_MENU_KEYBOARD)
-        asyncio.create_task(run_check_now_and_report(telegram, monitor, chat_id))
+        items = await store.snapshot()
+        total = len(items)
+        init_btn = CheckProgress(total=total, running=True).progress_bar_button()
+        msg = await telegram.send_message(
+            chat_id,
+            f"📦 В каталоге: <b>{total}</b> позиций",
+            {"inline_keyboard": [[{"text": init_btn, "callback_data": CB_NOOP}]]},
+        )
+        msg_id = int(msg["message_id"]) if msg and "message_id" in msg else None
+        asyncio.create_task(run_check_now_and_report(telegram, monitor, chat_id, msg_id))
         return
 
     if text == "/export":
@@ -691,11 +713,34 @@ async def handle_callback(
     telegram: TelegramClient,
     zara: ZaraClient,
     store: ProductStore,
+    monitor: MonitorService,
     chat_id: str | int,
     data: str,
     pending: dict[str, dict[str, Any]],
+    message_id: int | None = None,
 ) -> None:
     chat_key = str(chat_id)
+
+    if data == CB_NOOP:
+        return
+
+    if data == CB_CHECK_NOW:
+        if monitor.is_check_running():
+            if chat_key not in monitor.watching_chat_ids:
+                monitor.watching_chat_ids.add(chat_key)
+                asyncio.create_task(watch_and_release(telegram, monitor, chat_id, chat_key, message_id))
+            return
+        items = await store.snapshot()
+        total = len(items)
+        init_btn = CheckProgress(total=total, running=True).progress_bar_button()
+        await update_check_button(
+            telegram,
+            chat_id,
+            message_id,
+            [[{"text": init_btn, "callback_data": CB_NOOP}]],
+        )
+        asyncio.create_task(run_check_now_and_report(telegram, monitor, chat_id, message_id))
+        return
 
     if data.startswith("confirm_add:"):
         value = data.split(":", 1)[1]
@@ -815,8 +860,9 @@ async def telegram_listener(
                 if chat_id is None or not data or str(chat_id) not in config.tg_chat_ids:
                     continue
                 try:
+                    msg_id = callback_query.get("message", {}).get("message_id")
                     await telegram.answer_callback_query(callback_query["id"])
-                    await handle_callback(telegram, zara, store, chat_id, data, pending)
+                    await handle_callback(telegram, zara, store, monitor, chat_id, data, pending, message_id=msg_id)
                 except Exception as e:
                     logger.error("Failed to handle callback %r: %s", data, sanitize_log_value(str(e)))
                 continue

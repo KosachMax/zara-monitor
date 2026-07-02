@@ -60,6 +60,9 @@ class CheckProgress:
         filled = min(width, max(0, round(width * self.checked / self.total)))
         return "█" * filled + "░" * (width - filled)
 
+    def progress_bar_button(self) -> str:
+        return f"{self.progress_bar()} {self.checked}/{self.total}"
+
     def format_for_user(self, title: str | None = None) -> str:
         status = title or ("Проверка выполняется" if self.running else "Проверка завершена")
         elapsed_line = ""
@@ -129,8 +132,10 @@ class CheckSummary:
             f"Ошибок: <b>{self.errors}</b>",
         ]
         if self.results:
-            lines.extend(["", "<b>Сводка по товарам:</b>"])
-            lines.extend(result.format_for_user() for result in self.results)
+            in_stock = [r for r in self.results if r.is_available]
+            if in_stock:
+                lines.extend(["", "✅ <b>В наличии:</b>"])
+                lines.extend(r.format_for_user() for r in in_stock)
         return "\n".join(lines)
 
 

@@ -86,6 +86,19 @@ class TelegramClient:
         result = data.get("result")
         return result if isinstance(result, dict) else None
 
+    async def edit_message_reply_markup(
+        self,
+        chat_id: str | int,
+        message_id: int,
+        reply_markup: dict[str, Any],
+    ) -> None:
+        payload: dict[str, Any] = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "reply_markup": reply_markup,
+        }
+        await self.request("editMessageReplyMarkup", json_payload=payload, timeout=10.0)
+
     async def edit_message_text(
         self,
         chat_id: str | int,
