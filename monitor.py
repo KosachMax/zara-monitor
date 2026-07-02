@@ -11,16 +11,22 @@ Zara stock monitor, управляемый через Telegram.
 Store ID (магазин/регион, например 11734) — фиксирован для одного сайта Zara
 и задаётся один раз в .env, менять его для каждого нового товара не нужно.
 
-Команды в Telegram:
+Управление — через кнопки меню в чате (➕ Добавить / ➖ Удалить / 📋 Список),
+плюс те же действия командами:
   /add <артикул>     — показать размеры товара и предложить выбрать целевой
   /remove <артикул>  — снять товар (все выбранные для него размеры) с мониторинга
   /list              — показать все отслеживаемые товары и их текущий статус
+
+Товар можно добавить и шерингом прямо из приложения Zara (Поделиться →
+Telegram → этот бот) — бот сам узнаёт ссылку, достаёт из неё артикул
+и спрашивает подтверждение перед тем как показать размеры.
 """
 
 import asyncio
 import json
 import logging
 import os
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -54,6 +60,15 @@ IN_STOCK_STATUSES = {"in_stock", "low_on_stock", "available"}
 
 DATA_FILE = Path(os.environ.get("DATA_FILE", "/app/data/products.json"))
 
+BTN_ADD = "➕ Добавить"
+BTN_REMOVE = "➖ Удалить"
+BTN_LIST = "📋 Список"
+
+MAIN_MENU_KEYBOARD = {
+    "keyboard": [[{"text": BTN_ADD}, {"text": BTN_LIST}, {"text": BTN_REMOVE}]],
+    "resize_keyboard": True,
+}
+
 
 def parse_sizes(data: dict) -> list[dict]:
     """
@@ -83,19 +98,53 @@ def parse_sizes(data: dict) -> list[dict]:
     return sizes
 
 
-async def fetch_sizes(
+async def fetch_product(
     client: httpx.AsyncClient,
     product_id: str,
     store_id: str,
     locale: str,
-) -> list[dict]:
+) -> tuple[str, list[dict]]:
     url = PRODUCT_API_URL.format(store_id=store_id, product_id=product_id)
 
     response = await client.get(
         url, headers=HEADERS, params={"locale": locale}, timeout=15.0
     )
     response.raise_for_status()
-    return parse_sizes(response.json())
+    data = response.json()
+    return data.get("name", ""), parse_sizes(data)
+
+
+async def fetch_sizes(
+    client: httpx.AsyncClient,
+    product_id: str,
+    store_id: str,
+    locale: str,
+) -> list[dict]:
+    _, sizes = await fetch_product(client, product_id, store_id, locale)
+    return sizes
+
+
+# Артикул (product_id) в ссылках на товар Zara встречается либо как
+# query-параметр v1, либо в самом пути itxrest-эндпоинта /product/id/<id>.
+PRODUCT_URL_ID_PATTERNS = [
+    re.compile(r"[?&]v1=(\d+)"),
+    re.compile(r"/product/id/(\d+)"),
+]
+
+
+def find_zara_url(text: str) -> str | None:
+    url_match = re.search(r"https?://\S+", text)
+    if url_match and "zara.com" in url_match.group(0):
+        return url_match.group(0)
+    return None
+
+
+def extract_product_id_from_url(url: str) -> str | None:
+    for pattern in PRODUCT_URL_ID_PATTERNS:
+        id_match = pattern.search(url)
+        if id_match:
+            return id_match.group(1)
+    return None
 
 
 def load_products() -> list[dict]:
@@ -125,12 +174,21 @@ class ProductStore:
             self.items.append(item)
             save_products(self.items)
 
-    async def remove(self, product_id: str) -> list[dict]:
+    async def remove_all(self, product_id: str) -> list[dict]:
         async with self.lock:
             removed = [i for i in self.items if i["product_id"] == product_id]
             self.items = [i for i in self.items if i["product_id"] != product_id]
             save_products(self.items)
             return removed
+
+    async def remove_one(self, product_id: str, target_size_id) -> dict | None:
+        async with self.lock:
+            for i, item in enumerate(self.items):
+                if item["product_id"] == product_id and item["target_size_id"] == target_size_id:
+                    removed = self.items.pop(i)
+                    save_products(self.items)
+                    return removed
+            return None
 
     async def snapshot(self) -> list[dict]:
         async with self.lock:
@@ -149,16 +207,127 @@ class ProductStore:
             save_products(self.items)
 
 
-async def notify_telegram(client: httpx.AsyncClient, token: str, chat_id, text: str) -> None:
+async def send_message(
+    client: httpx.AsyncClient,
+    token: str,
+    chat_id,
+    text: str,
+    reply_markup: dict | None = None,
+) -> None:
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup
     resp = await client.post(url, json=payload, timeout=10.0)
     resp.raise_for_status()
 
 
-def format_size_choice(index: int, size: dict) -> str:
-    label = size["shortName"] or size["name"]
-    return f"{index}. {label} — {size['availability']}"
+async def answer_callback_query(client: httpx.AsyncClient, token: str, callback_query_id: str) -> None:
+    url = f"https://api.telegram.org/bot{token}/answerCallbackQuery"
+    resp = await client.post(url, json={"callback_query_id": callback_query_id}, timeout=10.0)
+    resp.raise_for_status()
+
+
+def size_label(size: dict) -> str:
+    return size["shortName"] or size["name"]
+
+
+def sizes_inline_keyboard(sizes: list[dict]) -> dict:
+    return {
+        "inline_keyboard": [
+            [{"text": f"{size_label(s)} — {s['availability']}", "callback_data": f"size:{i}"}]
+            for i, s in enumerate(sizes)
+        ]
+    }
+
+
+def removable_items_inline_keyboard(items: list[dict]) -> dict:
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": f"{i.get('product_name') or i['product_id']} / {i['target_size_label']}",
+                    "callback_data": f"remove:{i['product_id']}:{i['target_size_id']}",
+                }
+            ]
+            for i in items
+        ]
+    }
+
+
+async def send_add_prompt(client: httpx.AsyncClient, config: "Config", chat_id, pending: dict) -> None:
+    pending[chat_id] = {"stage": "awaiting_id"}
+    await send_message(client, config.tg_token, chat_id, "Пришли артикул товара (число из URL на zara.com).")
+
+
+async def start_add_flow(
+    client: httpx.AsyncClient, config: "Config", chat_id, product_id: str, pending: dict
+) -> None:
+    if not product_id.isdigit():
+        await send_message(client, config.tg_token, chat_id, "Артикул должен быть числом. Попробуй ещё раз.")
+        return
+
+    try:
+        name, sizes = await fetch_product(client, product_id, config.store_id, config.locale)
+    except Exception as e:
+        pending.pop(chat_id, None)
+        await send_message(
+            client, config.tg_token, chat_id, f"Не удалось получить товар {product_id}: {e}"
+        )
+        return
+
+    if not sizes:
+        pending.pop(chat_id, None)
+        await send_message(client, config.tg_token, chat_id, f"У товара {product_id} не нашлось размеров.")
+        return
+
+    pending[chat_id] = {
+        "stage": "choosing_size",
+        "product_id": product_id,
+        "product_name": name,
+        "sizes": sizes,
+    }
+    await send_message(
+        client, config.tg_token, chat_id,
+        f"{name or f'артикул {product_id}'}. Выбери размер:",
+        reply_markup=sizes_inline_keyboard(sizes),
+    )
+
+
+async def send_remove_prompt(
+    client: httpx.AsyncClient, store: ProductStore, config: "Config", chat_id
+) -> None:
+    items = await store.snapshot()
+    if not items:
+        await send_message(
+            client, config.tg_token, chat_id, "Список пуст, нечего удалять.", reply_markup=MAIN_MENU_KEYBOARD
+        )
+        return
+    await send_message(
+        client, config.tg_token, chat_id,
+        "Что убрать из мониторинга?",
+        reply_markup=removable_items_inline_keyboard(items),
+    )
+
+
+async def send_list(client: httpx.AsyncClient, store: ProductStore, config: "Config", chat_id) -> None:
+    items = await store.snapshot()
+    if not items:
+        await send_message(
+            client, config.tg_token, chat_id, "Список пуст. Нажми ➕ Добавить, чтобы начать.",
+            reply_markup=MAIN_MENU_KEYBOARD,
+        )
+        return
+
+    lines = [
+        f"• {i.get('product_name') or i['product_id']} / {i['target_size_label']}: "
+        f"{'✅' if i.get('last_available') else '❌'}"
+        for i in items
+    ]
+    await send_message(
+        client, config.tg_token, chat_id, "Отслеживаемые товары:\n\n" + "\n".join(lines),
+        reply_markup=MAIN_MENU_KEYBOARD,
+    )
 
 
 async def handle_message(
@@ -171,73 +340,106 @@ async def handle_message(
 ) -> None:
     text = text.strip()
 
-    if text.startswith("/add"):
-        parts = text.split(maxsplit=1)
-        product_id = parts[1].strip() if len(parts) > 1 else ""
-        if not product_id.isdigit():
-            await notify_telegram(client, config.tg_token, chat_id, "Использование: /add <артикул>")
+    if text in ("/start", "/menu"):
+        pending.pop(chat_id, None)
+        await send_message(
+            client, config.tg_token, chat_id,
+            "Zara Stock Monitor. Выбери действие:",
+            reply_markup=MAIN_MENU_KEYBOARD,
+        )
+        return
+
+    # Пришла ссылка на товар (например, шеринг из приложения Zara)
+    zara_url = find_zara_url(text)
+    if zara_url:
+        shared_product_id = extract_product_id_from_url(zara_url)
+        if not shared_product_id:
+            await send_message(
+                client, config.tg_token, chat_id,
+                "Это похоже на ссылку Zara, но не удалось найти в ней артикул. "
+                "Пришли артикул числом или нажми ➕ Добавить.",
+                reply_markup=MAIN_MENU_KEYBOARD,
+            )
             return
 
         try:
-            sizes = await fetch_sizes(client, product_id, config.store_id, config.locale)
+            name, sizes = await fetch_product(client, shared_product_id, config.store_id, config.locale)
         except Exception as e:
-            await notify_telegram(
-                client, config.tg_token, chat_id, f"Не удалось получить товар {product_id}: {e}"
+            await send_message(
+                client, config.tg_token, chat_id,
+                f"Не удалось получить товар {shared_product_id}: {e}",
+                reply_markup=MAIN_MENU_KEYBOARD,
             )
             return
 
-        if not sizes:
-            await notify_telegram(
-                client, config.tg_token, chat_id, f"У товара {product_id} не нашлось размеров."
-            )
-            return
-
-        pending[chat_id] = {"product_id": product_id, "sizes": sizes}
-        lines = [format_size_choice(i + 1, s) for i, s in enumerate(sizes)]
-        await notify_telegram(
-            client,
-            config.tg_token,
-            chat_id,
-            f"Товар {product_id}. Выбери размер (ответь номером или названием):\n\n"
-            + "\n".join(lines),
+        pending[chat_id] = {
+            "stage": "confirm_add",
+            "product_id": shared_product_id,
+            "product_name": name,
+            "sizes": sizes,
+        }
+        await send_message(
+            client, config.tg_token, chat_id,
+            f"Похоже на товар Zara: <b>{name or f'артикул {shared_product_id}'}</b>.\n"
+            f"Добавить его для мониторинга?",
+            reply_markup={
+                "inline_keyboard": [[
+                    {"text": "✅ Да", "callback_data": f"confirm_add:{shared_product_id}"},
+                    {"text": "❌ Нет", "callback_data": "confirm_add:no"},
+                ]]
+            },
         )
+        return
+
+    if text == BTN_ADD:
+        await send_add_prompt(client, config, chat_id, pending)
+        return
+
+    if text.startswith("/add"):
+        parts = text.split(maxsplit=1)
+        product_id = parts[1].strip() if len(parts) > 1 else ""
+        if not product_id:
+            await send_add_prompt(client, config, chat_id, pending)
+            return
+        await start_add_flow(client, config, chat_id, product_id, pending)
+        return
+
+    if text == BTN_REMOVE:
+        await send_remove_prompt(client, store, config, chat_id)
         return
 
     if text.startswith("/remove"):
         parts = text.split(maxsplit=1)
         product_id = parts[1].strip() if len(parts) > 1 else ""
         if not product_id:
-            await notify_telegram(client, config.tg_token, chat_id, "Использование: /remove <артикул>")
+            await send_remove_prompt(client, store, config, chat_id)
             return
 
-        removed = await store.remove(product_id)
+        removed = await store.remove_all(product_id)
         if removed:
-            await notify_telegram(
+            await send_message(
                 client, config.tg_token, chat_id,
                 f"Товар {product_id} снят с мониторинга ({len(removed)} размер(ов)).",
+                reply_markup=MAIN_MENU_KEYBOARD,
             )
         else:
-            await notify_telegram(client, config.tg_token, chat_id, f"Товар {product_id} не отслеживался.")
+            await send_message(
+                client, config.tg_token, chat_id, f"Товар {product_id} не отслеживался.",
+                reply_markup=MAIN_MENU_KEYBOARD,
+            )
         return
 
-    if text.startswith("/list"):
-        items = await store.snapshot()
-        if not items:
-            await notify_telegram(client, config.tg_token, chat_id, "Список пуст. Добавь товар: /add <артикул>")
-            return
-
-        lines = [
-            f"• {i['product_id']} / {i['target_size_label']}: "
-            f"{'✅' if i.get('last_available') else '❌'}"
-            for i in items
-        ]
-        await notify_telegram(
-            client, config.tg_token, chat_id, "Отслеживаемые товары:\n\n" + "\n".join(lines)
-        )
+    if text == BTN_LIST or text.startswith("/list"):
+        await send_list(client, store, config, chat_id)
         return
 
-    # Ответ на предыдущий /add — выбор размера из списка
-    if chat_id in pending:
+    # Пользователь набрал артикул текстом после нажатия "➕ Добавить"
+    if pending.get(chat_id, {}).get("stage") == "awaiting_id":
+        await start_add_flow(client, config, chat_id, text, pending)
+        return
+
+    # Фолбэк: выбор размера текстом вместо нажатия инлайн-кнопки
+    if pending.get(chat_id, {}).get("stage") == "choosing_size":
         info = pending.pop(chat_id)
         sizes = info["sizes"]
         chosen = None
@@ -254,31 +456,110 @@ async def handle_message(
                     break
 
         if chosen is None:
-            await notify_telegram(
+            await send_message(
                 client, config.tg_token, chat_id,
-                "Не понял выбор размера, добавление отменено. Начни заново: /add <артикул>",
+                "Не понял выбор размера, добавление отменено. Начни заново.",
+                reply_markup=MAIN_MENU_KEYBOARD,
             )
             return
 
-        is_available = chosen["availability"] in IN_STOCK_STATUSES
-        item = {
-            "product_id": info["product_id"],
-            "target_size_id": chosen["id"],
-            "target_size_label": chosen["shortName"] or chosen["name"],
-            "last_available": is_available,
-        }
-        await store.add(item)
-        status = "уже в наличии ✅" if is_available else "пока нет в наличии, сообщу когда появится ❌"
-        await notify_telegram(
-            client, config.tg_token, chat_id,
-            f"Добавлено: {info['product_id']} / {item['target_size_label']} — {status}",
+        await add_selected_size(
+            client, store, config, chat_id, info["product_id"], info.get("product_name", ""), chosen
         )
         return
 
-    await notify_telegram(
+    await send_message(
         client, config.tg_token, chat_id,
-        "Команды:\n/add <артикул>\n/remove <артикул>\n/list",
+        "Не понял. Используй кнопки меню ниже.",
+        reply_markup=MAIN_MENU_KEYBOARD,
     )
+
+
+async def add_selected_size(
+    client: httpx.AsyncClient,
+    store: ProductStore,
+    config: "Config",
+    chat_id,
+    product_id: str,
+    product_name: str,
+    chosen: dict,
+) -> None:
+    is_available = chosen["availability"] in IN_STOCK_STATUSES
+    item = {
+        "product_id": product_id,
+        "product_name": product_name,
+        "target_size_id": chosen["id"],
+        "target_size_label": size_label(chosen),
+        "last_available": is_available,
+    }
+    await store.add(item)
+    label = product_name or f"артикул {product_id}"
+    status = "уже в наличии ✅" if is_available else "пока нет в наличии, сообщу когда появится ❌"
+    await send_message(
+        client, config.tg_token, chat_id,
+        f"Добавлено: {label} / {item['target_size_label']} — {status}",
+        reply_markup=MAIN_MENU_KEYBOARD,
+    )
+
+
+async def handle_callback(
+    client: httpx.AsyncClient,
+    store: ProductStore,
+    config: "Config",
+    chat_id,
+    data: str,
+    pending: dict,
+) -> None:
+    if data.startswith("confirm_add:"):
+        value = data.split(":", 1)[1]
+        if value == "no":
+            pending.pop(chat_id, None)
+            await send_message(client, config.tg_token, chat_id, "Ок, не добавляю.", reply_markup=MAIN_MENU_KEYBOARD)
+            return
+
+        info = pending.get(chat_id)
+        if not info or info.get("stage") != "confirm_add" or info.get("product_id") != value:
+            # Кэш устарел или не совпал — просто заново пройдём флоу добавления
+            await start_add_flow(client, config, chat_id, value, pending)
+            return
+
+        pending[chat_id] = {**info, "stage": "choosing_size"}
+        name = info.get("product_name", "")
+        await send_message(
+            client, config.tg_token, chat_id,
+            f"{name or f'артикул {value}'}. Выбери размер:",
+            reply_markup=sizes_inline_keyboard(info["sizes"]),
+        )
+        return
+
+    if data.startswith("size:"):
+        info = pending.get(chat_id)
+        if not info or info.get("stage") != "choosing_size":
+            await send_message(client, config.tg_token, chat_id, "Этот выбор устарел, начни заново.")
+            return
+        idx = int(data.split(":", 1)[1])
+        sizes = info["sizes"]
+        if not (0 <= idx < len(sizes)):
+            return
+        pending.pop(chat_id, None)
+        await add_selected_size(
+            client, store, config, chat_id, info["product_id"], info.get("product_name", ""), sizes[idx]
+        )
+        return
+
+    if data.startswith("remove:"):
+        _, product_id, target_size_id = data.split(":", 2)
+        removed = await store.remove_one(product_id, int(target_size_id))
+        if removed:
+            label = removed.get("product_name") or product_id
+            await send_message(
+                client, config.tg_token, chat_id,
+                f"Убрано: {label} / {removed['target_size_label']}",
+                reply_markup=MAIN_MENU_KEYBOARD,
+            )
+        else:
+            await send_message(client, config.tg_token, chat_id, "Уже удалено.", reply_markup=MAIN_MENU_KEYBOARD)
+        return
 
 
 async def telegram_listener(client: httpx.AsyncClient, store: ProductStore, config: "Config") -> None:
@@ -301,6 +582,20 @@ async def telegram_listener(client: httpx.AsyncClient, store: ProductStore, conf
 
         for update in updates:
             offset = update["update_id"] + 1
+
+            callback_query = update.get("callback_query")
+            if callback_query is not None:
+                chat_id = callback_query.get("message", {}).get("chat", {}).get("id")
+                data = callback_query.get("data")
+                if chat_id is None or not data or str(chat_id) != str(config.tg_chat_id):
+                    continue
+                try:
+                    await answer_callback_query(client, config.tg_token, callback_query["id"])
+                    await handle_callback(client, store, config, chat_id, data, pending)
+                except Exception as e:
+                    logger.error(f"Failed to handle callback {data!r}: {e}")
+                continue
+
             message = update.get("message") or {}
             chat_id = message.get("chat", {}).get("id")
             text = message.get("text")
@@ -337,10 +632,11 @@ async def check_loop(client: httpx.AsyncClient, store: ProductStore, config: "Co
             )
 
             if is_available and not was_available:
-                await notify_telegram(
+                label = item.get("product_name") or f"артикул {item['product_id']}"
+                await send_message(
                     client, config.tg_token, config.tg_chat_id,
                     f"🛍 <b>Zara: размер появился!</b>\n\n"
-                    f"📦 Артикул {item['product_id']}\n"
+                    f"📦 {label}\n"
                     f"📐 Размер: <b>{item['target_size_label']}</b>\n"
                     f"🔗 https://www.zara.com/product/id/{item['product_id']}",
                 )
