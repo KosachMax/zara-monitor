@@ -587,7 +587,7 @@ async def telegram_listener(client: httpx.AsyncClient, store: ProductStore, conf
             if callback_query is not None:
                 chat_id = callback_query.get("message", {}).get("chat", {}).get("id")
                 data = callback_query.get("data")
-                if chat_id is None or not data or str(chat_id) != str(config.tg_chat_id):
+                if chat_id is None or not data or str(chat_id) not in config.tg_chat_ids:
                     continue
                 try:
                     await answer_callback_query(client, config.tg_token, callback_query["id"])
@@ -602,7 +602,7 @@ async def telegram_listener(client: httpx.AsyncClient, store: ProductStore, conf
 
             if chat_id is None or not text:
                 continue
-            if str(chat_id) != str(config.tg_chat_id):
+            if str(chat_id) not in config.tg_chat_ids:
                 logger.warning(f"Ignoring message from unknown chat {chat_id}")
                 continue
 
@@ -634,21 +634,22 @@ async def check_loop(client: httpx.AsyncClient, store: ProductStore, config: "Co
             if is_available and not was_available:
                 label = item.get("product_name") or f"артикул {item['product_id']}"
                 product_url = f"https://www.zara.com/us/en/-p.html?v1={item['product_id']}"
-                await send_message(
-                    client, config.tg_token, config.tg_chat_id,
-                    f"🛍 <b>Zara: размер появился!</b>\n\n"
-                    f"📦 {label}\n"
-                    f"📐 Размер: <b>{item['target_size_label']}</b>",
-                    reply_markup={
-                        "inline_keyboard": [[
-                            {"text": "🔗 Открыть товар", "url": product_url},
-                            {
-                                "text": "🔕 Отписаться",
-                                "callback_data": f"remove:{item['product_id']}:{item['target_size_id']}",
-                            },
-                        ]]
-                    },
-                )
+                for chat_id in config.tg_chat_ids:
+                    await send_message(
+                        client, config.tg_token, chat_id,
+                        f"🛍 <b>Zara: размер появился!</b>\n\n"
+                        f"📦 {label}\n"
+                        f"📐 Размер: <b>{item['target_size_label']}</b>",
+                        reply_markup={
+                            "inline_keyboard": [[
+                                {"text": "🔗 Открыть товар", "url": product_url},
+                                {
+                                    "text": "🔕 Отписаться",
+                                    "callback_data": f"remove:{item['product_id']}:{item['target_size_id']}",
+                                },
+                            ]]
+                        },
+                    )
 
             await store.set_availability(item["product_id"], item["target_size_id"], is_available)
 
@@ -658,7 +659,11 @@ async def check_loop(client: httpx.AsyncClient, store: ProductStore, config: "Co
 class Config:
     def __init__(self) -> None:
         self.tg_token = os.environ["TELEGRAM_BOT_TOKEN"]
-        self.tg_chat_id = os.environ["TELEGRAM_CHAT_ID"]
+        self.tg_chat_ids = {
+            chat_id.strip()
+            for chat_id in os.environ["TELEGRAM_CHAT_IDS"].split(",")
+            if chat_id.strip()
+        }
         self.store_id = os.environ["ZARA_STORE_ID"]
         self.locale = os.environ.get("ZARA_LOCALE", "en_GB")
         self.interval = int(os.environ.get("CHECK_INTERVAL_SEC", "300"))
