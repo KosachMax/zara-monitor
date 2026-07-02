@@ -60,6 +60,10 @@ IN_STOCK_STATUSES = {"in_stock", "low_on_stock", "available"}
 
 DATA_FILE = Path(os.environ.get("DATA_FILE", "/app/data/products.json"))
 
+# Пауза между запросами к Zara внутри одного цикла проверки — чтобы не долбить
+# API пачкой запросов подряд, когда товаров в списке много.
+REQUEST_DELAY_SEC = float(os.environ.get("REQUEST_DELAY_SEC", "1"))
+
 BTN_ADD = "➕ Добавить"
 BTN_REMOVE = "➖ Удалить"
 BTN_LIST = "📋 Список"
@@ -281,6 +285,11 @@ def size_label(size: dict) -> str:
     return size["shortName"] or size["name"]
 
 
+def product_page_url(product_id: str) -> str:
+    # Zara редиректит на канонический SEO-URL сама, достаточно правильного v1
+    return f"https://www.zara.com/us/en/-p.html?v1={product_id}"
+
+
 def sizes_inline_keyboard(sizes: list[dict]) -> dict:
     return {
         "inline_keyboard": [
@@ -371,9 +380,10 @@ async def send_list(client: httpx.AsyncClient, store: ProductStore, config: "Con
         return
 
     lines = [
-        f"• {i.get('product_name') or i['product_id']} / {i['target_size_label']}: "
+        f"{idx}. <a href=\"{product_page_url(i['product_id'])}\">"
+        f"{i.get('product_name') or i['product_id']}</a> / {i['target_size_label']}: "
         f"{'✅' if i.get('last_available') else '❌'}"
-        for i in items
+        for idx, i in enumerate(items, start=1)
     ]
     await send_message(
         client, config.tg_token, chat_id, "Отслеживаемые товары:\n\n" + "\n".join(lines),
@@ -681,6 +691,7 @@ async def check_loop(client: httpx.AsyncClient, store: ProductStore, config: "Co
                 sizes = await fetch_sizes(client, item["product_id"], config.store_id, config.locale)
             except Exception as e:
                 logger.error(f"Check failed for {item['product_id']}: {e}")
+                await asyncio.sleep(REQUEST_DELAY_SEC)
                 continue
 
             target = next((s for s in sizes if s["id"] == item["target_size_id"]), None)
@@ -695,7 +706,7 @@ async def check_loop(client: httpx.AsyncClient, store: ProductStore, config: "Co
 
             if is_available and not was_available:
                 label = item.get("product_name") or f"артикул {item['product_id']}"
-                product_url = f"https://www.zara.com/us/en/-p.html?v1={item['product_id']}"
+                product_url = product_page_url(item["product_id"])
                 for chat_id in config.tg_chat_ids:
                     await send_product_message(
                         client, config.tg_token, chat_id,
@@ -715,6 +726,7 @@ async def check_loop(client: httpx.AsyncClient, store: ProductStore, config: "Co
                     )
 
             await store.set_availability(item["product_id"], item["target_size_id"], is_available)
+            await asyncio.sleep(REQUEST_DELAY_SEC)
 
         await asyncio.sleep(config.interval)
 
