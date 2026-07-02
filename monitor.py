@@ -5,6 +5,15 @@ Product ID берём из URL:
   https://www.zara.com/ru/ru/blazer-p04544820.html?v1=347068588
                                                      ^^^^^^^^
                                                      PRODUCT_ID
+
+Store ID и locale — числовой идентификатор магазина/сайта Zara (не путать
+со страной сайта: с 2022 zara.ru не существует). Смотрятся сниффингом
+трафика приложения/сайта Zara — см. SNIFFING.md.
+
+ВНИМАНИЕ: сейчас это Фаза A — просто проверяем, что API вообще доступен
+и стабильно отдаёт данные. Сверка с конкретным целевым размером (ZARA_SIZE)
+временно отключена, монитор просто логирует и шлёт в Telegram полный список
+размеров с их статусом наличия.
 """
 
 import asyncio
@@ -23,7 +32,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 PRODUCT_API_URL = (
-    "https://www.zara.com/{country}/{lang}/product/{product_id}/extra-detail.json"
+    "https://www.zara.com/itxrest/4/catalog/store/{store_id}/product/id/{product_id}"
 )
 
 HEADERS = {
@@ -41,46 +50,53 @@ HEADERS = {
 IN_STOCK_STATUSES = {"in_stock", "low_on_stock", "available"}
 
 
-def parse_sizes(data: dict, target_size: str) -> tuple[bool, list[str]]:
+def parse_sizes(data: dict) -> list[dict]:
     """
-    Разбираем ответ Zara API.
+    Разбираем ответ Zara itxrest API.
 
     Структура ответа:
-      { "detail": { "colors": [ { "sizes": [ { "name": "M", "availability": "in_stock" } ] } ] } }
-    """
-    available_sizes: list[str] = []
+      { "detail": { "colors": [ { "sizes": [
+          { "id": 18, "name": "1½ years (86 cm)", "shortName": "1½ y", "availability": "out_of_stock" }
+      ] } ] } }
 
-    # Некоторые эндпоинты оборачивают данные в "detail", некоторые нет
+    Возвращает список всех размеров товара с их статусом наличия
+    (без сверки с каким-либо конкретным целевым размером — это Фаза B).
+    """
+    sizes: list[dict] = []
+
     detail = data.get("detail", data)
     colors = detail.get("colors", [])
 
     for color in colors:
         for size in color.get("sizes", []):
-            name = size.get("name", "").strip().upper()
-            status = size.get("availability", "").lower()
-            if status in IN_STOCK_STATUSES and name:
-                available_sizes.append(name)
+            sizes.append(
+                {
+                    "id": size.get("id"),
+                    "name": size.get("name", ""),
+                    "shortName": size.get("shortName", ""),
+                    "availability": size.get("availability", "").lower(),
+                }
+            )
 
-    target = target_size.strip().upper()
-    return target in available_sizes, available_sizes
+    return sizes
 
 
-async def fetch_availability(
+async def fetch_sizes(
     client: httpx.AsyncClient,
     product_id: str,
-    target_size: str,
-    country: str,
-    lang: str,
-) -> tuple[bool, list[str]]:
-    url = PRODUCT_API_URL.format(country=country, lang=lang, product_id=product_id)
+    store_id: str,
+    locale: str,
+) -> list[dict]:
+    url = PRODUCT_API_URL.format(store_id=store_id, product_id=product_id)
 
     try:
-        response = await client.get(url, headers=HEADERS, timeout=15.0)
+        response = await client.get(
+            url, headers=HEADERS, params={"locale": locale}, timeout=15.0
+        )
         response.raise_for_status()
-        return parse_sizes(response.json(), target_size)
+        return parse_sizes(response.json())
 
     except httpx.HTTPStatusError as e:
-        # 403 — Zara заблокировала запрос (нужны куки / другой User-Agent)
         logger.warning(f"HTTP {e.response.status_code} — {url}")
         raise
 
@@ -103,55 +119,52 @@ async def notify_telegram(token: str, chat_id: str, text: str) -> None:
 async def main() -> None:
     # --- Config from env ---
     product_id = os.environ["ZARA_PRODUCT_ID"]
-    target_size = os.environ["ZARA_SIZE"].strip().upper()
+    store_id = os.environ["ZARA_STORE_ID"]
     tg_token = os.environ["TELEGRAM_BOT_TOKEN"]
     tg_chat_id = os.environ["TELEGRAM_CHAT_ID"]
 
-    country = os.environ.get("ZARA_COUNTRY", "ru")
-    lang = os.environ.get("ZARA_LANG", "ru")
+    locale = os.environ.get("ZARA_LOCALE", "en_GB")
     interval = int(os.environ.get("CHECK_INTERVAL_SEC", "300"))
     product_name = os.environ.get("ZARA_PRODUCT_NAME", f"article {product_id}")
 
-    product_url = f"https://www.zara.com/{country}/{lang}/product/{product_id}"
+    product_url = f"https://www.zara.com/product/id/{product_id}"
 
     logger.info(
-        f"Monitor started | product={product_id} ({product_name}) | "
-        f"size={target_size} | interval={interval}s"
+        f"Monitor started (Phase A: connectivity check only) | "
+        f"product={product_id} ({product_name}) | store={store_id} | "
+        f"interval={interval}s"
     )
 
-    last_state: bool | None = None
+    last_sizes: list[dict] | None = None
     consecutive_errors = 0
 
     async with httpx.AsyncClient() as client:
         while True:
             try:
-                is_available, available_sizes = await fetch_availability(
-                    client, product_id, target_size, country, lang
-                )
+                sizes = await fetch_sizes(client, product_id, store_id, locale)
                 consecutive_errors = 0
 
-                status_emoji = "✅" if is_available else "❌"
+                summary = ", ".join(
+                    f"{s['shortName'] or s['name']}: {s['availability']}" for s in sizes
+                )
                 logger.info(
                     f"[{datetime.now().strftime('%H:%M:%S')}] "
-                    f"{target_size}: {status_emoji} | "
-                    f"in stock: {', '.join(available_sizes) or 'none'}"
+                    f"sizes: {summary or 'none returned'}"
                 )
 
-                # Уведомляем при смене состояния out→in или при старте если уже есть
-                should_notify = is_available and (last_state is False or last_state is None)
-
-                if should_notify:
-                    prefix = "уже в наличии" if last_state is None else "появился"
+                if sizes != last_sizes:
                     message = (
-                        f"🛍 <b>Zara: размер {prefix}!</b>\n\n"
+                        f"🛍 <b>Zara Monitor: список размеров</b>\n\n"
                         f"📦 {product_name}\n"
-                        f"📐 Размер: <b>{target_size}</b>\n"
                         f"🔗 {product_url}\n\n"
-                        f"✅ Доступные: {', '.join(available_sizes)}"
+                        + "\n".join(
+                            f"• {s['shortName'] or s['name']}: {s['availability']}"
+                            for s in sizes
+                        )
                     )
                     await notify_telegram(tg_token, tg_chat_id, message)
 
-                last_state = is_available
+                last_sizes = sizes
 
             except Exception as e:
                 consecutive_errors += 1
