@@ -482,6 +482,15 @@ async def handle_message(
         return
 
     if text in ("/check_now", BTN_CHECK_NOW):
+        if monitor.is_check_running():
+            await telegram.send_message(
+                chat_id,
+                monitor.current_progress().format_for_user("Проверка уже выполняется, дождись результата"),
+                MAIN_MENU_KEYBOARD,
+            )
+            asyncio.create_task(watch_running_check_and_report(telegram, monitor, chat_id))
+            return
+
         await telegram.send_message(chat_id, "Запускаю внеочередную проверку в фоне...", MAIN_MENU_KEYBOARD)
         asyncio.create_task(run_check_now_and_report(telegram, monitor, chat_id))
         return

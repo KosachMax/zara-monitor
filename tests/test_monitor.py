@@ -8,6 +8,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import monitor  # noqa: E402
+import zara_monitor.bot_controller as bot_controller_module  # noqa: E402
 import zara_monitor.monitor_service as monitor_service_module  # noqa: E402
 import zara_monitor.storage as storage_module  # noqa: E402
 
@@ -315,3 +316,104 @@ def test_log_sanitizer_masks_telegram_tokens():
 
     assert "AAHZHsn" not in sanitized
     assert "bot<redacted>" in sanitized
+
+
+def test_repeated_check_now_does_not_restart_running_check(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Pressing /check_now again while a check is already running must not
+    start a second real check — it should just report the running check's
+    current status, per user report of the button "resetting" progress."""
+
+    fetch_started = asyncio.Event()
+    release_fetch = asyncio.Event()
+    fetch_calls = 0
+
+    class SlowFakeZara:
+        async def fetch_product(self, product_id: str):
+            nonlocal fetch_calls
+            fetch_calls += 1
+            fetch_started.set()
+            await release_fetch.wait()
+            return {
+                "product_id": product_id,
+                "name": "Sweatshirt",
+                "image_url": None,
+                "colors": [
+                    {
+                        "id": "color-1",
+                        "name": "Ecru",
+                        "image_url": None,
+                        "sizes": [{"id": "24", "availability": "out_of_stock"}],
+                    }
+                ],
+            }
+
+    class FakeTelegram:
+        def __init__(self):
+            self.sent_texts: list[str] = []
+
+        async def send_message(self, chat_id, text, reply_markup=None):
+            self.sent_texts.append(text)
+            return {"message_id": 1}
+
+        async def send_product_message(self, chat_id, text, image_url=None, reply_markup=None):
+            self.sent_texts.append(text)
+
+        async def edit_message_text(self, chat_id, message_id, text, reply_markup=None):
+            self.sent_texts.append(text)
+
+    data_file = tmp_path / "products.json"
+    data_file.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "subscriptions": [
+                    {
+                        "id": "sub-1",
+                        "chat_id": "111",
+                        "product_id": "543271392",
+                        "product_name": "Sweatshirt",
+                        "color_id": "color-1",
+                        "target_size_id": "24",
+                        "target_size_label": "2 y",
+                        "last_available": False,
+                    }
+                ],
+            }
+        )
+    )
+    monkeypatch.setattr(storage_module, "DATA_FILE", data_file)
+    monkeypatch.setattr(monitor_service_module, "REQUEST_DELAY_SEC", 0)
+
+    store = monitor.ProductStore(chat_ids=["111"], max_items=10)
+    telegram = FakeTelegram()
+    config = monitor.Config(
+        tg_token="token",
+        tg_chat_ids=["111"],
+        store_id="11734",
+        locale="en_GB",
+        interval=300,
+        health_error_threshold=3,
+        max_tracked_items=10,
+        telegram_conflict_exit_threshold=5,
+    )
+    health = monitor.HealthMonitor(threshold=3)
+    zara = SlowFakeZara()
+    service = monitor.MonitorService(cast(Any, zara), cast(Any, telegram), store, config, health)
+    pending: dict[str, dict[str, Any]] = {}
+
+    async def scenario():
+        first_check = asyncio.create_task(service.check_once())
+        await asyncio.wait_for(fetch_started.wait(), timeout=1)
+
+        # Second press arrives while the first check is still in flight.
+        await bot_controller_module.handle_message(
+            cast(Any, telegram), cast(Any, zara), store, service, health, config, "111", "/check_now", pending
+        )
+
+        release_fetch.set()
+        await asyncio.wait_for(first_check, timeout=1)
+
+    asyncio.run(scenario())
+
+    assert fetch_calls == 1, "a second /check_now press must not trigger another Zara fetch"
+    assert any("уже выполняется" in text for text in telegram.sent_texts)
