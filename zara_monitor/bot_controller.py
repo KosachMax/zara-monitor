@@ -75,15 +75,15 @@ def format_waitlist(items: list[dict[str, Any]], page: int) -> tuple[str, dict[s
     return "\n".join(lines), keyboard
 
 
-def format_check_result(items: list[dict[str, Any]]) -> str:
-    in_stock = [item for item in items if item.get("last_available")]
-    out_count = len(items) - len(in_stock)
+def format_check_result(items: list[dict[str, Any]], pre_available_ids: set[str]) -> str:
+    newly_available = [item for item in items if item.get("last_available") and item["id"] not in pre_available_ids]
+    out_count = sum(1 for item in items if not item.get("last_available"))
 
     lines = ["<b>📊 Результаты проверки</b>"]
 
-    if in_stock:
-        lines.append("\n✅ <b>В наличии:</b>")
-        for i, item in enumerate(in_stock, 1):
+    if newly_available:
+        lines.append("\n✅ <b>Появилось:</b>")
+        for i, item in enumerate(newly_available, 1):
             name = html_escape(item.get("product_name") or item["product_id"])
             size = html_escape(item["target_size_label"])
             color = html_escape(item.get("color_name") or "")
@@ -228,6 +228,9 @@ async def run_check_now_and_report(
     chat_id: str | int,
     message_id: int | None = None,
 ) -> None:
+    pre_snapshot = await monitor.store.snapshot(str(chat_id))
+    pre_available_ids = {item["id"] for item in pre_snapshot if item.get("last_available")}
+
     last_btn = ""
     last_update_at = 0.0
 
@@ -257,7 +260,7 @@ async def run_check_now_and_report(
 
     items = await monitor.store.snapshot(str(chat_id))
     if items:
-        await telegram.send_message(chat_id, format_check_result(items), MAIN_MENU_KEYBOARD)
+        await telegram.send_message(chat_id, format_check_result(items, pre_available_ids), MAIN_MENU_KEYBOARD)
 
 
 async def watch_running_check_and_report(
@@ -266,6 +269,9 @@ async def watch_running_check_and_report(
     chat_id: str | int,
     message_id: int | None = None,
 ) -> None:
+    pre_snapshot = await monitor.store.snapshot(str(chat_id))
+    pre_available_ids = {item["id"] for item in pre_snapshot if item.get("last_available")}
+
     last_btn = ""
     while monitor.is_check_running():
         btn_text = monitor.current_progress().progress_bar_button()
@@ -283,7 +289,7 @@ async def watch_running_check_and_report(
 
     items = await monitor.store.snapshot(str(chat_id))
     if items:
-        await telegram.send_message(chat_id, format_check_result(items), MAIN_MENU_KEYBOARD)
+        await telegram.send_message(chat_id, format_check_result(items, pre_available_ids), MAIN_MENU_KEYBOARD)
 
 
 async def watch_and_release(
