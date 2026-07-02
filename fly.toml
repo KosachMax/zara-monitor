@@ -6,8 +6,8 @@
 #
 # See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 
-app = 'zara-monitor-crimson-canyon-554'
-primary_region = 'fra'
+app = 'zara-monitor'
+primary_region = 'iad'
 
 [build]
 
