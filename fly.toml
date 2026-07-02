@@ -1,0 +1,21 @@
+# fly.toml app configuration file for zara-monitor
+#
+# Фоновый воркер без HTTP-сервера: слушает Telegram через long polling
+# и опрашивает Zara по таймеру, поэтому [http_service] не нужен —
+# без него Fly не пытается остановить машину из-за отсутствия трафика.
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+
+app = 'zara-monitor-crimson-canyon-554'
+primary_region = 'fra'
+
+[build]
+
+[[vm]]
+  memory = '256mb'
+  cpu_kind = 'shared'
+  cpus = 1
+
+[mounts]
+  source = "zara_data"
+  destination = "/app/data"
