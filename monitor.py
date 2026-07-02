@@ -374,7 +374,7 @@ def format_waitlist(items: list[dict]) -> str:
     lines = [f"<b>Список ожидания · {len(items)} товаров</b>"]
     for item in items:
         name = (item.get("product_name") or item["product_id"]).title()
-        size = item["target_size_label"]
+        size = f'<a href="{product_page_url(item["product_id"])}">{item["target_size_label"]}</a>'
         if item.get("last_available"):
             status = f"<b><i>↳ {size} · ✅ появился!</i></b>"
         else:
