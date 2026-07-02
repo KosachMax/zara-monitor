@@ -140,7 +140,11 @@ def test_storage_rejects_directory_at_data_file(tmp_path: Path, monkeypatch: pyt
 
 def test_legacy_migrated_subscriptions_notify_all_chats(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     class FakeZara:
+        def __init__(self):
+            self.fetch_calls = 0
+
         async def fetch_product(self, product_id: str):
+            self.fetch_calls += 1
             return {
                 "product_id": product_id,
                 "name": "Sweatshirt",
@@ -194,14 +198,17 @@ def test_legacy_migrated_subscriptions_notify_all_chats(tmp_path: Path, monkeypa
         max_tracked_items=10,
         telegram_conflict_exit_threshold=5,
     )
+    zara = FakeZara()
     service = monitor.MonitorService(
-        cast(Any, FakeZara()), cast(Any, telegram), store, config, monitor.HealthMonitor(threshold=3)
+        cast(Any, zara), cast(Any, telegram), store, config, monitor.HealthMonitor(threshold=3)
     )
 
     summary = asyncio.run(service.check_once())
 
     assert summary.notifications == 2
     assert telegram.sent_chat_ids == ["111", "222"]
+    assert zara.fetch_calls == 1, "both chats' subscriptions share one product_id, Zara should only be fetched once"
+    assert summary.checked == 1, "progress/summary should count unique products, not per-chat subscriptions"
 
 
 def test_notification_state_is_saved_before_telegram_delivery_result(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -422,13 +429,18 @@ def test_repeated_check_now_does_not_restart_running_check(tmp_path: Path, monke
     monkeypatch.setattr(bot_controller_module.asyncio, "create_task", tracking_create_task)
 
     async def scenario():
-        first_check = asyncio.create_task(service.check_once())
+        # Use the unpatched create_task here — asyncio.create_task is a single
+        # module-global function, so the tracking patch below would otherwise
+        # also count this task as one of the handler's background tasks.
+        first_check = real_create_task(service.check_once())
         await asyncio.wait_for(fetch_started.wait(), timeout=1)
 
-        # Second press arrives while the first check is still in flight.
-        await bot_controller_module.handle_message(
-            cast(Any, telegram), cast(Any, zara), store, service, health, config, "111", "/check_now", pending
-        )
+        # Second and third presses arrive while the first check is still in
+        # flight — only the first of these should spawn a watcher task.
+        for _ in range(2):
+            await bot_controller_module.handle_message(
+                cast(Any, telegram), cast(Any, zara), store, service, health, config, "111", "/check_now", pending
+            )
 
         release_fetch.set()
         await asyncio.wait_for(first_check, timeout=1)
@@ -438,6 +450,8 @@ def test_repeated_check_now_does_not_restart_running_check(tmp_path: Path, monke
     asyncio.run(scenario())
 
     assert fetch_calls == 1, "a second /check_now press must not trigger another Zara fetch"
+    assert len(background_tasks) == 1, "repeated presses while running must not spawn more than one watcher task"
+    assert service.watching_chat_ids == set(), "watcher must release its chat slot once the check is done"
     assert any("уже выполняется" in text for text in telegram.sent_texts)
     assert any("Проверка завершена" in text for text in telegram.sent_texts), (
         "final check summary must reach the watcher, not get lost to a failed edit"

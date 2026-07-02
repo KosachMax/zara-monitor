@@ -219,6 +219,22 @@ async def watch_running_check_and_report(
         await edit_or_send_status(telegram, chat_id, final_text, message_id)
 
 
+async def watch_and_release(
+    telegram: TelegramClient,
+    monitor: MonitorService,
+    chat_id: str | int,
+    chat_key: str,
+) -> None:
+    """Runs watch_running_check_and_report and always frees the chat's slot
+    in monitor.watching_chat_ids afterwards, even if the watcher errors out —
+    otherwise a crashed watcher would permanently block future /check_now
+    presses for that chat."""
+    try:
+        await watch_running_check_and_report(telegram, monitor, chat_id)
+    finally:
+        monitor.watching_chat_ids.discard(chat_key)
+
+
 async def send_add_prompt(
     telegram: TelegramClient,
     chat_id: str | int,
@@ -487,10 +503,11 @@ async def handle_message(
 
     if text in ("/check_now", BTN_CHECK_NOW):
         if monitor.is_check_running():
-            # watch_running_check_and_report sends the first status update itself
-            # on its own first loop iteration — sending one here too would just
-            # duplicate that message.
-            asyncio.create_task(watch_running_check_and_report(telegram, monitor, chat_id))
+            if chat_key not in monitor.watching_chat_ids:
+                monitor.watching_chat_ids.add(chat_key)
+                asyncio.create_task(watch_and_release(telegram, monitor, chat_id, chat_key))
+            # Already watching this chat — the running watcher keeps editing
+            # the same message, so a repeated press has nothing new to do.
             return
 
         await telegram.send_message(chat_id, "Запускаю внеочередную проверку в фоне...", MAIN_MENU_KEYBOARD)

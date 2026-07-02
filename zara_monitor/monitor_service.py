@@ -151,6 +151,10 @@ class MonitorService:
         self.check_lock = asyncio.Lock()
         self.progress = CheckProgress()
         self.last_summary: CheckSummary | None = None
+        # Chats that already have a background /check_now watcher attached to
+        # the currently running check. Prevents spawning a new watcher (and a
+        # new tracked message) on every repeated button press.
+        self.watching_chat_ids: set[str] = set()
 
     def is_check_running(self) -> bool:
         return self.check_lock.locked()
@@ -182,9 +186,24 @@ class MonitorService:
         async with self.check_lock:
             items = await self.store.snapshot()
             started_at = datetime.now()
+
+            # Several subscriptions (different chats, colors, or sizes) can
+            # point at the same Zara product_id — most commonly because the
+            # multi-user migration gives every chat its own copy of a legacy
+            # subscription. Fetch each unique product once instead of once
+            # per subscription, and show progress against that unique count
+            # rather than the (larger, less intuitive) subscription count.
+            unique_product_ids: list[str] = []
+            seen_product_ids: set[str] = set()
+            for item in items:
+                product_id = str(item["product_id"])
+                if product_id not in seen_product_ids:
+                    seen_product_ids.add(product_id)
+                    unique_product_ids.append(product_id)
+
             self.progress = CheckProgress(
                 running=True,
-                total=len(items),
+                total=len(unique_product_ids),
                 started_at=started_at,
                 updated_at=started_at,
             )
@@ -203,21 +222,46 @@ class MonitorService:
             available = 0
             results: list[CheckItemResult] = []
 
+            products: dict[str, dict[str, Any]] = {}
+            product_errors: dict[str, str] = {}
+
+            for product_id in unique_product_ids:
+                self.progress.current_product_id = product_id
+                self.progress.updated_at = datetime.now()
+                await self.publish_progress(progress_callback)
+
+                try:
+                    products[product_id] = await self.zara.fetch_product(product_id)
+                except ZaraError as e:
+                    error = str(sanitize_log_value(e))
+                    product_errors[product_id] = error
+                    logger.error("Check failed for %s: %s", product_id, error)
+                finally:
+                    checked += 1
+                    self.progress.checked = checked
+                    self.progress.updated_at = datetime.now()
+                    await self.publish_progress(progress_callback)
+                    await asyncio.sleep(REQUEST_DELAY_SEC)
+
             for item in items:
+                product_id = str(item["product_id"])
                 item_result = CheckItemResult(
-                    product_id=str(item["product_id"]),
+                    product_id=product_id,
                     product_name=str(item.get("product_name") or ""),
                     target_size_label=str(item["target_size_label"]),
                     color_name=str(item.get("color_name") or ""),
                 )
-                self.progress.current_product_id = item_result.product_id
-                self.progress.updated_at = datetime.now()
-                await self.publish_progress(progress_callback)
 
-                checked += 1
+                if product_id in product_errors:
+                    error = product_errors[product_id]
+                    item_result.error = error
+                    errors.append(f"{product_id}: {error}")
+                    results.append(item_result)
+                    await self.store.set_error(item["id"], error)
+                    continue
+
                 try:
-                    product = await self.zara.fetch_product(item["product_id"])
-                    color, target = find_target_size(product, item)
+                    color, target = find_target_size(products[product_id], item)
                     is_available = bool(target) and target["availability"] in IN_STOCK_STATUSES
                     item_result.is_available = is_available
                     if is_available:
@@ -226,7 +270,7 @@ class MonitorService:
                     logger.info(
                         "[%s] %s / %s%s: %s",
                         datetime.now().strftime("%H:%M:%S"),
-                        item["product_id"],
+                        product_id,
                         item["target_size_label"],
                         f" / {item['color_name']}" if item.get("color_name") else "",
                         "✅" if is_available else "❌",
@@ -244,27 +288,19 @@ class MonitorService:
                                 "Stock is available, but notification was skipped because chat_id is not allowed"
                             )
                             await self.store.set_error(item["id"], item_result.error)
-                except ZaraError as e:
-                    error = str(sanitize_log_value(e))
-                    item_result.error = error
-                    errors.append(f"{item['product_id']}: {error}")
-                    logger.error("Check failed for %s: %s", item["product_id"], error)
-                    await self.store.set_error(item["id"], error)
                 except TelegramError as e:
                     error = str(sanitize_log_value(e))
                     item_result.error = error
                     errors.append(f"telegram: {error}")
-                    logger.error("Notification failed for %s: %s", item["product_id"], error)
+                    logger.error("Notification failed for %s: %s", product_id, error)
                     await self.store.set_error(item["id"], error)
                 finally:
                     results.append(item_result)
-                    self.progress.checked = checked
                     self.progress.errors = len(errors)
                     self.progress.notifications = notifications
                     self.progress.available = available
                     self.progress.updated_at = datetime.now()
                     await self.publish_progress(progress_callback)
-                    await asyncio.sleep(REQUEST_DELAY_SEC)
 
             if errors:
                 alert_due = self.health.record_failure(errors[0])
@@ -277,7 +313,7 @@ class MonitorService:
 
             self.progress = CheckProgress(
                 running=False,
-                total=len(items),
+                total=len(unique_product_ids),
                 checked=checked,
                 errors=len(errors),
                 notifications=notifications,

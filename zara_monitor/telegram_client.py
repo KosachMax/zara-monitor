@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import logging
 from typing import Any
 
@@ -43,7 +44,11 @@ class TelegramClient:
         if response.status_code == 429:
             raise TelegramRateLimitedError(f"Telegram {method} rate limit exceeded")
         if response.status_code >= 400:
-            raise TelegramRequestError(f"Telegram {method} failed: HTTP {response.status_code}")
+            description = None
+            with contextlib.suppress(ValueError):
+                description = response.json().get("description")
+            suffix = f" — {description}" if description else ""
+            raise TelegramRequestError(f"Telegram {method} failed: HTTP {response.status_code}{suffix}")
 
         try:
             data = response.json()
