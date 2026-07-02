@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import uuid
 from typing import Any
 
@@ -151,25 +152,36 @@ async def edit_or_send_status(
     text: str,
     message_id: int | None,
 ) -> int | None:
-    if message_id is None:
+    if message_id is not None:
         try:
-            message = await telegram.send_message(chat_id, text, MAIN_MENU_KEYBOARD)
+            # Telegram's editMessageText only accepts an inline keyboard in
+            # reply_markup — a custom reply keyboard like MAIN_MENU_KEYBOARD is
+            # rejected with HTTP 400, which silently broke every progress update.
+            await telegram.edit_message_text(chat_id, message_id, text)
+            return message_id
         except TelegramError as e:
-            # An unhandled error here would kill the whole background
-            # watcher/reporter task silently — the check keeps running, but
-            # the user never sees any progress or final result at all.
-            logger.warning("Failed to send check status message for chat %s: %s", chat_id, e)
-            return None
-        return int(message["message_id"]) if message and "message_id" in message else None
+            # Editing this particular message has proven unreliable in
+            # practice (reproduced live: a message can start rejecting every
+            # further edit with "message can't be edited" for reasons that
+            # don't reproduce in isolation). Rather than silently leaving the
+            # user staring at a stale message, fall through and send a fresh
+            # one so the update is never just lost.
+            logger.warning(
+                "Failed to edit check status message %s for chat %s, sending a new one instead: %s",
+                message_id,
+                chat_id,
+                e,
+            )
+
     try:
-        # Telegram's editMessageText only accepts an inline keyboard in
-        # reply_markup — a custom reply keyboard like MAIN_MENU_KEYBOARD is
-        # rejected with HTTP 400, which silently broke every progress update.
-        await telegram.edit_message_text(chat_id, message_id, text)
-        return message_id
+        message = await telegram.send_message(chat_id, text, MAIN_MENU_KEYBOARD)
     except TelegramError as e:
-        logger.warning("Failed to edit check status message %s for chat %s: %s", message_id, chat_id, e)
-        return message_id
+        # An unhandled error here would kill the whole background
+        # watcher/reporter task silently — the check keeps running, but
+        # the user never sees any progress or final result at all.
+        logger.warning("Failed to send check status message for chat %s: %s", chat_id, e)
+        return None
+    return int(message["message_id"]) if message and "message_id" in message else None
 
 
 async def run_check_now_and_report(
@@ -179,12 +191,22 @@ async def run_check_now_and_report(
     message_id: int | None = None,
 ) -> None:
     last_text = ""
+    last_update_at = 0.0
 
     async def publish(progress: CheckProgress) -> None:
-        nonlocal last_text, message_id
+        nonlocal last_text, last_update_at, message_id
         text = progress.format_for_user()
         if text == last_text:
             return
+        # Updating on every single subscription/product would fire an edit
+        # roughly once a second across a long check — pace it down to the
+        # same cadence as the "already running" watcher instead. The true
+        # final result is always sent separately below regardless of this
+        # throttle, so skipping an intermediate tick here never loses it.
+        now = time.monotonic()
+        if now - last_update_at < CHECK_NOW_WATCH_POLL_SEC:
+            return
+        last_update_at = now
         message_id = await edit_or_send_status(telegram, chat_id, text, message_id)
         last_text = text
 

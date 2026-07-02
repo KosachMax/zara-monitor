@@ -325,6 +325,41 @@ def test_log_sanitizer_masks_telegram_tokens():
     assert "bot<redacted>" in sanitized
 
 
+def test_edit_or_send_status_falls_back_to_new_message_when_edit_fails():
+    """Reproduced live on the deployed bot: a message can start rejecting
+    every further editMessageText call ("message can't be edited") for
+    reasons that don't reproduce in isolated testing. Regardless of why,
+    the user must still see the update — via a fresh message instead of
+    a silently stale one."""
+
+    class FlakyTelegram:
+        def __init__(self):
+            self.sent: list[str] = []
+            self.next_message_id = 100
+
+        async def send_message(self, chat_id, text, reply_markup=None):
+            self.next_message_id += 1
+            self.sent.append(text)
+            return {"message_id": self.next_message_id}
+
+        async def edit_message_text(self, chat_id, message_id, text, reply_markup=None):
+            raise monitor.TelegramRequestError(
+                "Telegram editMessageText failed: HTTP 400 — Bad Request: message can't be edited"
+            )
+
+    telegram = FlakyTelegram()
+
+    first_message_id = asyncio.run(
+        bot_controller_module.edit_or_send_status(cast(Any, telegram), "111", "first update", None)
+    )
+    second_message_id = asyncio.run(
+        bot_controller_module.edit_or_send_status(cast(Any, telegram), "111", "second update", first_message_id)
+    )
+
+    assert telegram.sent == ["first update", "second update"]
+    assert second_message_id != first_message_id, "a failed edit must fall back to a brand new message, not be dropped"
+
+
 def test_repeated_check_now_does_not_restart_running_check(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Pressing /check_now again while a check is already running must not
     start a second real check — it should just report the running check's
