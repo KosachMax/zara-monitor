@@ -111,7 +111,10 @@ class MonitorService:
                         "✅" if is_available else "❌",
                     )
 
-                    if is_available and not item.get("last_available"):
+                    became_available = is_available and not item.get("last_available")
+                    await self.store.set_check_result(item["id"], is_available=is_available)
+
+                    if became_available:
                         sent = await self.send_stock_notification(item, color)
                         notifications += int(sent)
                         if not sent:
@@ -119,9 +122,6 @@ class MonitorService:
                                 item["id"],
                                 "Stock is available, but notification was skipped because chat_id is not allowed",
                             )
-                            continue
-
-                    await self.store.set_check_result(item["id"], is_available=is_available)
                 except ZaraError as e:
                     error = str(sanitize_log_value(e))
                     errors.append(f"{item['product_id']}: {error}")
@@ -131,6 +131,7 @@ class MonitorService:
                     error = str(sanitize_log_value(e))
                     errors.append(f"telegram: {error}")
                     logger.error("Notification failed for %s: %s", item["product_id"], error)
+                    await self.store.set_error(item["id"], error)
                 finally:
                     await asyncio.sleep(REQUEST_DELAY_SEC)
 
