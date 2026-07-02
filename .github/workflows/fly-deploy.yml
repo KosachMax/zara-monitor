@@ -32,13 +32,16 @@ jobs:
           pip install -r requirements.txt -r requirements-dev.txt
 
       - name: Check syntax
-        run: python -m py_compile monitor.py
+        run: python -m compileall monitor.py zara_monitor tests
 
       - name: Ruff lint
         run: ruff check .
 
       - name: Ruff format check
         run: ruff format --check .
+
+      - name: Tests
+        run: pytest
 
   deploy:
     name: Deploy app
