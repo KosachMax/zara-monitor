@@ -370,6 +370,19 @@ async def send_remove_prompt(
     )
 
 
+def format_waitlist(items: list[dict]) -> str:
+    lines = [f"<b>Список ожидания · {len(items)} товаров</b>"]
+    for item in items:
+        name = (item.get("product_name") or item["product_id"]).title()
+        size = item["target_size_label"]
+        if item.get("last_available"):
+            status = f"<b><i>↳ {size} · ✅ появился!</i></b>"
+        else:
+            status = f"<i>↳ {size} · ❌ нет в наличии</i>"
+        lines.append(f"\n<b>{name}</b>\n{status}")
+    return "\n".join(lines)
+
+
 async def send_list(client: httpx.AsyncClient, store: ProductStore, config: "Config", chat_id) -> None:
     items = await store.snapshot()
     if not items:
@@ -379,14 +392,8 @@ async def send_list(client: httpx.AsyncClient, store: ProductStore, config: "Con
         )
         return
 
-    lines = [
-        f"{idx}. <a href=\"{product_page_url(i['product_id'])}\">"
-        f"{i.get('product_name') or i['product_id']}</a> / {i['target_size_label']}: "
-        f"{'✅' if i.get('last_available') else '❌'}"
-        for idx, i in enumerate(items, start=1)
-    ]
     await send_message(
-        client, config.tg_token, chat_id, "Отслеживаемые товары:\n\n" + "\n".join(lines),
+        client, config.tg_token, chat_id, format_waitlist(items),
         reply_markup=MAIN_MENU_KEYBOARD,
     )
 
