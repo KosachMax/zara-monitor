@@ -40,9 +40,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-PRODUCT_API_URL = (
-    "https://www.zara.com/itxrest/4/catalog/store/{store_id}/product/id/{product_id}"
-)
+PRODUCT_API_URL = "https://www.zara.com/itxrest/4/catalog/store/{store_id}/product/id/{product_id}"
 
 HEADERS = {
     "User-Agent": (
@@ -124,9 +122,7 @@ async def fetch_product(
 ) -> tuple[str, str | None, list[dict]]:
     url = PRODUCT_API_URL.format(store_id=store_id, product_id=product_id)
 
-    response = await client.get(
-        url, headers=HEADERS, params={"locale": locale}, timeout=15.0
-    )
+    response = await client.get(url, headers=HEADERS, params={"locale": locale}, timeout=15.0)
     response.raise_for_status()
     data = response.json()
     return data.get("name", ""), extract_image_url(data), parse_sizes(data)
@@ -212,15 +208,10 @@ class ProductStore:
         async with self.lock:
             return list(self.items)
 
-    async def set_availability(
-        self, product_id: str, target_size_id, is_available: bool
-    ) -> None:
+    async def set_availability(self, product_id: str, target_size_id, is_available: bool) -> None:
         async with self.lock:
             for item in self.items:
-                if (
-                    item["product_id"] == product_id
-                    and item["target_size_id"] == target_size_id
-                ):
+                if item["product_id"] == product_id and item["target_size_id"] == target_size_id:
                     item["last_available"] = is_available
             save_products(self.items)
 
@@ -318,9 +309,7 @@ async def send_add_prompt(client: httpx.AsyncClient, config: "Config", chat_id, 
     await send_message(client, config.tg_token, chat_id, "Пришли артикул товара (число из URL на zara.com).")
 
 
-async def start_add_flow(
-    client: httpx.AsyncClient, config: "Config", chat_id, product_id: str, pending: dict
-) -> None:
+async def start_add_flow(client: httpx.AsyncClient, config: "Config", chat_id, product_id: str, pending: dict) -> None:
     if not product_id.isdigit():
         await send_message(client, config.tg_token, chat_id, "Артикул должен быть числом. Попробуй ещё раз.")
         return
@@ -329,9 +318,7 @@ async def start_add_flow(
         name, image_url, sizes = await fetch_product(client, product_id, config.store_id, config.locale)
     except Exception as e:
         pending.pop(chat_id, None)
-        await send_message(
-            client, config.tg_token, chat_id, f"Не удалось получить товар {product_id}: {e}"
-        )
+        await send_message(client, config.tg_token, chat_id, f"Не удалось получить товар {product_id}: {e}")
         return
 
     if not sizes:
@@ -347,16 +334,16 @@ async def start_add_flow(
         "sizes": sizes,
     }
     await send_product_message(
-        client, config.tg_token, chat_id,
+        client,
+        config.tg_token,
+        chat_id,
         f"{name or f'артикул {product_id}'}. Выбери размер:",
         image_url=image_url,
         reply_markup=sizes_inline_keyboard(sizes),
     )
 
 
-async def send_remove_prompt(
-    client: httpx.AsyncClient, store: ProductStore, config: "Config", chat_id
-) -> None:
+async def send_remove_prompt(client: httpx.AsyncClient, store: ProductStore, config: "Config", chat_id) -> None:
     items = await store.snapshot()
     if not items:
         await send_message(
@@ -364,7 +351,9 @@ async def send_remove_prompt(
         )
         return
     await send_message(
-        client, config.tg_token, chat_id,
+        client,
+        config.tg_token,
+        chat_id,
         "Что убрать из мониторинга?",
         reply_markup=removable_items_inline_keyboard(items),
     )
@@ -387,13 +376,19 @@ async def send_list(client: httpx.AsyncClient, store: ProductStore, config: "Con
     items = await store.snapshot()
     if not items:
         await send_message(
-            client, config.tg_token, chat_id, "Список пуст. Нажми ➕ Добавить, чтобы начать.",
+            client,
+            config.tg_token,
+            chat_id,
+            "Список пуст. Нажми ➕ Добавить, чтобы начать.",
             reply_markup=MAIN_MENU_KEYBOARD,
         )
         return
 
     await send_message(
-        client, config.tg_token, chat_id, format_waitlist(items),
+        client,
+        config.tg_token,
+        chat_id,
+        format_waitlist(items),
         reply_markup=MAIN_MENU_KEYBOARD,
     )
 
@@ -411,7 +406,9 @@ async def handle_message(
     if text in ("/start", "/menu"):
         pending.pop(chat_id, None)
         await send_message(
-            client, config.tg_token, chat_id,
+            client,
+            config.tg_token,
+            chat_id,
             "Zara Stock Monitor. Выбери действие:",
             reply_markup=MAIN_MENU_KEYBOARD,
         )
@@ -423,7 +420,9 @@ async def handle_message(
         shared_product_id = extract_product_id_from_url(zara_url)
         if not shared_product_id:
             await send_message(
-                client, config.tg_token, chat_id,
+                client,
+                config.tg_token,
+                chat_id,
                 "Это похоже на ссылку Zara, но не удалось найти в ней артикул. "
                 "Пришли артикул числом или нажми ➕ Добавить.",
                 reply_markup=MAIN_MENU_KEYBOARD,
@@ -431,12 +430,12 @@ async def handle_message(
             return
 
         try:
-            name, image_url, sizes = await fetch_product(
-                client, shared_product_id, config.store_id, config.locale
-            )
+            name, image_url, sizes = await fetch_product(client, shared_product_id, config.store_id, config.locale)
         except Exception as e:
             await send_message(
-                client, config.tg_token, chat_id,
+                client,
+                config.tg_token,
+                chat_id,
                 f"Не удалось получить товар {shared_product_id}: {e}",
                 reply_markup=MAIN_MENU_KEYBOARD,
             )
@@ -450,15 +449,18 @@ async def handle_message(
             "sizes": sizes,
         }
         await send_product_message(
-            client, config.tg_token, chat_id,
-            f"Похоже на товар Zara: <b>{name or f'артикул {shared_product_id}'}</b>.\n"
-            f"Добавить его для мониторинга?",
+            client,
+            config.tg_token,
+            chat_id,
+            f"Похоже на товар Zara: <b>{name or f'артикул {shared_product_id}'}</b>.\nДобавить его для мониторинга?",
             image_url=image_url,
             reply_markup={
-                "inline_keyboard": [[
-                    {"text": "✅ Да", "callback_data": f"confirm_add:{shared_product_id}"},
-                    {"text": "❌ Нет", "callback_data": "confirm_add:no"},
-                ]]
+                "inline_keyboard": [
+                    [
+                        {"text": "✅ Да", "callback_data": f"confirm_add:{shared_product_id}"},
+                        {"text": "❌ Нет", "callback_data": "confirm_add:no"},
+                    ]
+                ]
             },
         )
         return
@@ -490,13 +492,18 @@ async def handle_message(
         removed = await store.remove_all(product_id)
         if removed:
             await send_message(
-                client, config.tg_token, chat_id,
+                client,
+                config.tg_token,
+                chat_id,
                 f"Товар {product_id} снят с мониторинга ({len(removed)} размер(ов)).",
                 reply_markup=MAIN_MENU_KEYBOARD,
             )
         else:
             await send_message(
-                client, config.tg_token, chat_id, f"Товар {product_id} не отслеживался.",
+                client,
+                config.tg_token,
+                chat_id,
+                f"Товар {product_id} не отслеживался.",
                 reply_markup=MAIN_MENU_KEYBOARD,
             )
         return
@@ -529,20 +536,30 @@ async def handle_message(
 
         if chosen is None:
             await send_message(
-                client, config.tg_token, chat_id,
+                client,
+                config.tg_token,
+                chat_id,
                 "Не понял выбор размера, добавление отменено. Начни заново.",
                 reply_markup=MAIN_MENU_KEYBOARD,
             )
             return
 
         await add_selected_size(
-            client, store, config, chat_id, info["product_id"],
-            info.get("product_name", ""), info.get("product_image"), chosen,
+            client,
+            store,
+            config,
+            chat_id,
+            info["product_id"],
+            info.get("product_name", ""),
+            info.get("product_image"),
+            chosen,
         )
         return
 
     await send_message(
-        client, config.tg_token, chat_id,
+        client,
+        config.tg_token,
+        chat_id,
         "Не понял. Используй кнопки меню ниже.",
         reply_markup=MAIN_MENU_KEYBOARD,
     )
@@ -571,7 +588,9 @@ async def add_selected_size(
     label = product_name or f"артикул {product_id}"
     status = "уже в наличии ✅" if is_available else "пока нет в наличии, сообщу когда появится ❌"
     await send_product_message(
-        client, config.tg_token, chat_id,
+        client,
+        config.tg_token,
+        chat_id,
         f"Добавлено: {label} / {item['target_size_label']} — {status}",
         image_url=product_image,
         reply_markup=MAIN_MENU_KEYBOARD,
@@ -603,7 +622,9 @@ async def handle_callback(
         name = info.get("product_name", "")
         image_url = info.get("product_image")
         await send_product_message(
-            client, config.tg_token, chat_id,
+            client,
+            config.tg_token,
+            chat_id,
             f"{name or f'артикул {value}'}. Выбери размер:",
             image_url=image_url,
             reply_markup=sizes_inline_keyboard(info["sizes"]),
@@ -621,8 +642,14 @@ async def handle_callback(
             return
         pending.pop(chat_id, None)
         await add_selected_size(
-            client, store, config, chat_id, info["product_id"],
-            info.get("product_name", ""), info.get("product_image"), sizes[idx],
+            client,
+            store,
+            config,
+            chat_id,
+            info["product_id"],
+            info.get("product_name", ""),
+            info.get("product_image"),
+            sizes[idx],
         )
         return
 
@@ -632,7 +659,9 @@ async def handle_callback(
         if removed:
             label = removed.get("product_name") or product_id
             await send_message(
-                client, config.tg_token, chat_id,
+                client,
+                config.tg_token,
+                chat_id,
                 f"Убрано: {label} / {removed['target_size_label']}",
                 reply_markup=MAIN_MENU_KEYBOARD,
             )
@@ -716,19 +745,21 @@ async def check_loop(client: httpx.AsyncClient, store: ProductStore, config: "Co
                 product_url = product_page_url(item["product_id"])
                 for chat_id in config.tg_chat_ids:
                     await send_product_message(
-                        client, config.tg_token, chat_id,
-                        f"🛍 <b>Zara: размер появился!</b>\n\n"
-                        f"📦 {label}\n"
-                        f"📐 Размер: <b>{item['target_size_label']}</b>",
+                        client,
+                        config.tg_token,
+                        chat_id,
+                        f"🛍 <b>Zara: размер появился!</b>\n\n📦 {label}\n📐 Размер: <b>{item['target_size_label']}</b>",
                         image_url=item.get("product_image"),
                         reply_markup={
-                            "inline_keyboard": [[
-                                {"text": "🔗 Открыть товар", "url": product_url},
-                                {
-                                    "text": "🔕 Отписаться",
-                                    "callback_data": f"remove:{item['product_id']}:{item['target_size_id']}",
-                                },
-                            ]]
+                            "inline_keyboard": [
+                                [
+                                    {"text": "🔗 Открыть товар", "url": product_url},
+                                    {
+                                        "text": "🔕 Отписаться",
+                                        "callback_data": f"remove:{item['product_id']}:{item['target_size_id']}",
+                                    },
+                                ]
+                            ]
                         },
                     )
 
@@ -742,9 +773,7 @@ class Config:
     def __init__(self) -> None:
         self.tg_token = os.environ["TELEGRAM_BOT_TOKEN"]
         self.tg_chat_ids = {
-            chat_id.strip()
-            for chat_id in os.environ["TELEGRAM_CHAT_IDS"].split(",")
-            if chat_id.strip()
+            chat_id.strip() for chat_id in os.environ["TELEGRAM_CHAT_IDS"].split(",") if chat_id.strip()
         }
         self.store_id = os.environ["ZARA_STORE_ID"]
         self.locale = os.environ.get("ZARA_LOCALE", "en_GB")
@@ -756,8 +785,7 @@ async def main() -> None:
     store = ProductStore()
 
     logger.info(
-        f"Monitor started | tracking {len(store.items)} item(s) | "
-        f"store={config.store_id} | interval={config.interval}s"
+        f"Monitor started | tracking {len(store.items)} item(s) | store={config.store_id} | interval={config.interval}s"
     )
 
     async with httpx.AsyncClient() as client:
