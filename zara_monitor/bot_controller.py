@@ -26,14 +26,18 @@ from .logging_config import sanitize_log_value
 from .monitor_service import CheckProgress, MonitorService
 from .storage import ProductStore
 from .telegram_client import TelegramClient
-from .utils import extract_product_id_from_url, find_zara_url, html_escape, now_iso, product_page_url, size_label
+from .utils import (
+    extract_product_id_from_url,
+    find_zara_url,
+    html_escape,
+    now_iso,
+    product_page_url,
+    size_label,
+    unique_product_count,
+)
 from .zara_client import ZaraClient, product_image
 
 logger = logging.getLogger(__name__)
-
-
-def unique_product_count(items: list[dict[str, Any]]) -> int:
-    return len({item["product_id"] for item in items})
 
 
 def clamp_page(page: int, total_items: int) -> int:

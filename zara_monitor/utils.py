@@ -38,3 +38,7 @@ def size_label(size: dict[str, Any]) -> str:
 def product_page_url(product_id: str) -> str:
     # Zara redirects to the canonical SEO URL. A valid v1 is enough.
     return f"https://www.zara.com/bg/en/-p.html?v1={product_id}"
+
+
+def unique_product_count(items: list[dict[str, Any]]) -> int:
+    return len({item["product_id"] for item in items})
