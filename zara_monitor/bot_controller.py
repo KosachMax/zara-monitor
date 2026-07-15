@@ -32,6 +32,10 @@ from .zara_client import ZaraClient, product_image
 logger = logging.getLogger(__name__)
 
 
+def unique_product_count(items: list[dict[str, Any]]) -> int:
+    return len({item["product_id"] for item in items})
+
+
 def clamp_page(page: int, total_items: int) -> int:
     total_pages = max(1, (total_items + PAGE_SIZE - 1) // PAGE_SIZE)
     return max(0, min(page, total_pages - 1))
@@ -613,7 +617,7 @@ async def handle_message(
                 progress = monitor.current_progress()
                 msg = await telegram.send_message(
                     chat_id,
-                    f"📦 В каталоге: <b>{len(all_items)}</b> позиций",
+                    f"📦 В каталоге: <b>{unique_product_count(all_items)}</b> товаров",
                     {"inline_keyboard": [[{"text": progress.progress_bar_button(), "callback_data": CB_NOOP}]]},
                 )
                 msg_id = int(msg["message_id"]) if msg and "message_id" in msg else None
@@ -621,11 +625,11 @@ async def handle_message(
             return
 
         items = await store.snapshot()
-        total = len(items)
+        total = unique_product_count(items)
         init_btn = CheckProgress(total=total, running=True).progress_bar_button()
         msg = await telegram.send_message(
             chat_id,
-            f"📦 В каталоге: <b>{total}</b> позиций",
+            f"📦 В каталоге: <b>{total}</b> товаров",
             {"inline_keyboard": [[{"text": init_btn, "callback_data": CB_NOOP}]]},
         )
         msg_id = int(msg["message_id"]) if msg and "message_id" in msg else None
@@ -798,7 +802,7 @@ async def handle_callback(
                 asyncio.create_task(watch_and_release(telegram, monitor, chat_id, chat_key, message_id))
             return
         items = await store.snapshot()
-        total = len(items)
+        total = unique_product_count(items)
         init_btn = CheckProgress(total=total, running=True).progress_bar_button()
         await update_check_button(
             telegram,
