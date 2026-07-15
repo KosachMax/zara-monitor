@@ -291,7 +291,7 @@ async def run_check_now_and_report(
         [[{"text": "🔄 Проверить снова", "callback_data": CB_CHECK_NOW}]],
     )
 
-    items = await monitor.store.snapshot(str(chat_id))
+    items = await monitor.store.snapshot()
     if items:
         await send_check_result(telegram, chat_id, items)
 
@@ -317,7 +317,7 @@ async def watch_running_check_and_report(
         [[{"text": "🔄 Проверить снова", "callback_data": CB_CHECK_NOW}]],
     )
 
-    items = await monitor.store.snapshot(str(chat_id))
+    items = await monitor.store.snapshot()
     if items:
         await send_check_result(telegram, chat_id, items)
 
@@ -495,7 +495,7 @@ async def send_list(
     chat_id: str | int,
     page: int = 0,
 ) -> None:
-    items = await store.snapshot(str(chat_id))
+    items = await store.snapshot()
     if not items:
         await telegram.send_message(
             chat_id,
@@ -514,7 +514,7 @@ async def send_remove_prompt(
     chat_id: str | int,
     page: int = 0,
 ) -> None:
-    items = await store.snapshot(str(chat_id))
+    items = await store.snapshot()
     if not items:
         await telegram.send_message(chat_id, "Список пуст, нечего удалять.", MAIN_MENU_KEYBOARD)
         return
@@ -609,18 +609,18 @@ async def handle_message(
         if monitor.is_check_running():
             if chat_key not in monitor.watching_chat_ids:
                 monitor.watching_chat_ids.add(chat_key)
-                chat_items = await store.snapshot(str(chat_id))
+                all_items = await store.snapshot()
                 progress = monitor.current_progress()
                 msg = await telegram.send_message(
                     chat_id,
-                    f"📦 В каталоге: <b>{len(chat_items)}</b> позиций",
+                    f"📦 В каталоге: <b>{len(all_items)}</b> позиций",
                     {"inline_keyboard": [[{"text": progress.progress_bar_button(), "callback_data": CB_NOOP}]]},
                 )
                 msg_id = int(msg["message_id"]) if msg and "message_id" in msg else None
                 asyncio.create_task(watch_and_release(telegram, monitor, chat_id, chat_key, msg_id))
             return
 
-        items = await store.snapshot(str(chat_id))
+        items = await store.snapshot()
         total = len(items)
         init_btn = CheckProgress(total=total, running=True).progress_bar_button()
         msg = await telegram.send_message(
@@ -633,7 +633,7 @@ async def handle_message(
         return
 
     if text == "/export":
-        exported = await store.export_state(chat_key)
+        exported = await store.export_state()
         if len(exported) > 3500:
             await telegram.send_message(
                 chat_id,
@@ -797,7 +797,7 @@ async def handle_callback(
                 monitor.watching_chat_ids.add(chat_key)
                 asyncio.create_task(watch_and_release(telegram, monitor, chat_id, chat_key, message_id))
             return
-        items = await store.snapshot(str(chat_id))
+        items = await store.snapshot()
         total = len(items)
         init_btn = CheckProgress(total=total, running=True).progress_bar_button()
         await update_check_button(

@@ -339,33 +339,37 @@ class MonitorService:
             return self.last_summary
 
     async def send_stock_notification(self, item: dict[str, Any], color: dict[str, Any] | None) -> bool:
-        chat_id = str(item["chat_id"])
-        if chat_id not in self.config.tg_chat_ids:
-            logger.warning("Skipping notification for unauthorized chat %s", chat_id)
-            return False
-
         label = item.get("product_name") or f"артикул {item['product_id']}"
         color_name = item.get("color_name") or (color or {}).get("name") or ""
         color_line = f"\n🎨 Цвет: <b>{html_escape(color_name)}</b>" if color_name else ""
         product_url = product_page_url(item["product_id"])
         image_url = item.get("color_image") or item.get("product_image") or (color or {}).get("image_url")
-
-        await self.telegram.send_product_message(
-            chat_id,
+        text = (
             f"🛍 <b>Zara: размер появился!</b>\n\n"
             f"📦 {html_escape(label)}{color_line}\n"
-            f"📐 Размер: <b>{html_escape(item['target_size_label'])}</b>",
-            image_url=image_url,
-            reply_markup={
-                "inline_keyboard": [
-                    [
-                        {"text": "🔗 Открыть товар", "url": product_url},
-                        {"text": "🔕 Отписаться", "callback_data": f"remove_id:{item['id']}"},
-                    ]
-                ]
-            },
+            f"📐 Размер: <b>{html_escape(item['target_size_label'])}</b>"
         )
-        return True
+        reply_markup = {
+            "inline_keyboard": [
+                [
+                    {"text": "🔗 Открыть товар", "url": product_url},
+                    {"text": "🔕 Отписаться", "callback_data": f"remove_id:{item['id']}"},
+                ]
+            ]
+        }
+
+        delivered = False
+        last_error: TelegramError | None = None
+        for chat_id in self.config.tg_chat_ids:
+            try:
+                await self.telegram.send_product_message(chat_id, text, image_url=image_url, reply_markup=reply_markup)
+                delivered = True
+            except TelegramError as e:
+                last_error = e
+                logger.error("Failed to send stock notification to %s: %s", chat_id, e)
+        if not delivered and last_error is not None:
+            raise last_error
+        return delivered
 
     async def broadcast_health_alert(self, error: str) -> bool:
         text = (

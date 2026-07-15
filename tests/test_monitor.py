@@ -77,7 +77,10 @@ def test_find_target_size_uses_color_id_when_present():
     assert size["availability"] == "in_stock"
 
 
-def test_storage_migrates_legacy_list_to_all_chat_ids_and_deduplicates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_storage_migrates_legacy_list_deduplicated_globally(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Legacy v1 files are migrated into a single shared subscription pool.
+    Identical items (same product+color+size) are deduped to one entry regardless
+    of how many chat_ids are configured — subscriptions are global, not per-chat."""
     data_file = tmp_path / "products.json"
     legacy_item = {
         "product_id": "543271392",
@@ -92,19 +95,15 @@ def test_storage_migrates_legacy_list_to_all_chat_ids_and_deduplicates(tmp_path:
     store = monitor.ProductStore(chat_ids=["111", "222"], max_items=10)
 
     async def scenario():
-        assert len(await store.snapshot()) == 2
-
-        for chat_id in ("111", "222"):
-            items = await store.snapshot(chat_id)
-            assert len(items) == 1
-            assert items[0]["chat_id"] == chat_id
-            assert items[0]["color_id"] == monitor.DEFAULT_COLOR_ID
-            assert items[0]["target_size_id"] == "24"
+        items = await store.snapshot()
+        assert len(items) == 1, "two identical legacy items must be deduped to one shared subscription"
+        assert items[0]["color_id"] == monitor.DEFAULT_COLOR_ID
+        assert items[0]["target_size_id"] == "24"
 
         added, existing = await store.add(
             {
                 "id": "new-id",
-                "chat_id": "111",
+                "chat_id": "222",
                 "product_id": "543271392",
                 "product_name": "Sweatshirt",
                 "product_image": None,
@@ -118,15 +117,15 @@ def test_storage_migrates_legacy_list_to_all_chat_ids_and_deduplicates(tmp_path:
                 "last_error": None,
             }
         )
-        assert added is False
+        assert added is False, "adding the same product from any chat must be rejected as a global duplicate"
         assert existing is not None
-        assert len(await store.snapshot("111")) == 1
+        assert len(await store.snapshot()) == 1
 
     asyncio.run(scenario())
 
     saved_state = json.loads(data_file.read_text())
     assert saved_state["schema_version"] == monitor.STATE_SCHEMA_VERSION
-    assert len(saved_state["subscriptions"]) == 2
+    assert len(saved_state["subscriptions"]) == 1
 
 
 def test_storage_rejects_directory_at_data_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -205,10 +204,10 @@ def test_legacy_migrated_subscriptions_notify_all_chats(tmp_path: Path, monkeypa
 
     summary = asyncio.run(service.check_once())
 
-    assert summary.notifications == 2
-    assert telegram.sent_chat_ids == ["111", "222"]
-    assert zara.fetch_calls == 1, "both chats' subscriptions share one product_id, Zara should only be fetched once"
-    assert summary.checked == 1, "progress/summary should count unique products, not per-chat subscriptions"
+    assert summary.notifications == 1, "one shared subscription triggers one notification broadcast"
+    assert telegram.sent_chat_ids == ["111", "222"], "broadcast reaches all authorized chat_ids"
+    assert zara.fetch_calls == 1, "one shared subscription means one Zara API call"
+    assert summary.checked == 1
 
 
 def test_notification_state_is_saved_before_telegram_delivery_result(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

@@ -76,11 +76,7 @@ def load_state(chat_ids: list[str]) -> tuple[list[dict[str, Any]], bool]:
         raise StorageError(f"Failed to read {DATA_FILE}: {e}") from e
 
     if isinstance(raw_state, list):
-        normalized = [
-            normalize_subscription(item, chat_id, force_new_id=len(chat_ids) > 1)
-            for item in raw_state
-            for chat_id in chat_ids
-        ]
+        normalized = [normalize_subscription(item, chat_ids[0]) for item in raw_state]
         deduped, removed_duplicates = dedupe_subscriptions(normalized)
         if removed_duplicates:
             logger.warning("Removed %s duplicate legacy subscription(s) during migration", removed_duplicates)
@@ -181,9 +177,7 @@ class ProductStore:
     async def remove_all(self, chat_id: str, product_id: str) -> list[dict[str, Any]]:
         self.ensure_available()
         async with self.lock:
-            removed = [
-                item for item in self.items if item["chat_id"] == str(chat_id) and item["product_id"] == str(product_id)
-            ]
+            removed = [item for item in self.items if item["product_id"] == str(product_id)]
             if not removed:
                 return []
             self.items = [item for item in self.items if item not in removed]
@@ -194,7 +188,7 @@ class ProductStore:
         self.ensure_available()
         async with self.lock:
             for index, item in enumerate(self.items):
-                if item["id"] == subscription_id and item["chat_id"] == str(chat_id):
+                if item["id"] == subscription_id:
                     removed = self.items.pop(index)
                     save_state(self.items)
                     return removed
@@ -204,11 +198,7 @@ class ProductStore:
         self.ensure_available()
         async with self.lock:
             for index, item in enumerate(self.items):
-                if (
-                    item["chat_id"] == str(chat_id)
-                    and item["product_id"] == str(product_id)
-                    and str(item["target_size_id"]) == str(target_size_id)
-                ):
+                if item["product_id"] == str(product_id) and str(item["target_size_id"]) == str(target_size_id):
                     removed = self.items.pop(index)
                     save_state(self.items)
                     return removed
@@ -258,9 +248,8 @@ class ProductStore:
         )
 
 
-def subscription_key(item: dict[str, Any]) -> tuple[str, str, str, str]:
+def subscription_key(item: dict[str, Any]) -> tuple[str, str, str]:
     return (
-        str(item["chat_id"]),
         str(item["product_id"]),
         str(item.get("color_id") or DEFAULT_COLOR_ID),
         str(item["target_size_id"]),
