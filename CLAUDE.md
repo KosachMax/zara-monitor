@@ -40,6 +40,8 @@ Needs a `.env` with `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_IDS`, `ZARA_STORE_ID` (
 
 Deploy: push to `main` — `.github/workflows/fly-deploy.yml` runs the checks above, then `flyctl deploy --config fly.toml`. Manual deploy: `fly deploy --config fly.toml -a zara-monitor`.
 
+**Workflow rule: after ANY code change in this repo, always push to `main`.** GitHub Actions auto-deploys to Fly.io on every push to main — there are no separate deploy steps.
+
 ## Architecture
 
 `monitor.py` is a thin compatibility entrypoint (`from zara_monitor import *`); all real logic lives in `zara_monitor/`. `zara_monitor/app.py:main()` starts two asyncio tasks concurrently:
